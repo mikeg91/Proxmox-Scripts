@@ -99,11 +99,22 @@ pct set "$CTID" -mp0 /mnt/pve/synology,mp=/synology,ro=1
 echo -e "${GREEN}Configuring Intel iGPU passthrough...${NC}"
 CONFIG_FILE="/etc/pve/lxc/${CTID}.conf"
 
-cat >> "$CONFIG_FILE" << 'EOF'
+# Logic to find the correct card node (card0 or card1)
+DETECTED_CARD=$(ls /dev/dri/card* 2>/dev/null | head -n 1)
 
-# Intel iGPU passthrough
+if [[ -z "$DETECTED_CARD" ]]; then
+    echo -e "${RED}Error: No GPU card node found in /dev/dri!${NC}"
+    echo -e "${YELLOW}Ensure your iGPU is enabled in BIOS and drivers are loaded on the host.${NC}"
+    exit 1
+fi
+
+echo -e "${YELLOW}Detected GPU node: $DETECTED_CARD${NC}"
+
+cat >> "$CONFIG_FILE" << EOF
+
+# Intel iGPU passthrough (Auto-detected)
 dev0: /dev/dri/renderD128,gid=993,mode=0666
-dev1: /dev/dri/card1,gid=44,mode=0666
+dev1: $DETECTED_CARD,gid=44,mode=0666
 lxc.apparmor.profile: unconfined
 lxc.cap.drop:
 EOF
