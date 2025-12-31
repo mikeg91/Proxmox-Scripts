@@ -101,11 +101,8 @@ CONFIG_FILE="/etc/pve/lxc/${CTID}.conf"
 
 cat >> "$CONFIG_FILE" << 'EOF'
 
-# Intel iGPU passthrough (VAAPI)
-lxc.cgroup2.devices.allow: c 226:* rwm
-lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
-
-# Required for VAAPI / Plex hardware transcoding
+# Intel iGPU passthrough
+dev0: /dev/dri/renderD128,gid=993,mode=0666
 lxc.apparmor.profile: unconfined
 lxc.cap.drop:
 EOF
