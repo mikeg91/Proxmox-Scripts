@@ -103,6 +103,7 @@ cat >> "$CONFIG_FILE" << 'EOF'
 
 # Intel iGPU passthrough
 dev0: /dev/dri/renderD128,gid=993,mode=0666
+dev1: /dev/dri/card1,gid=44,mode=0666
 lxc.apparmor.profile: unconfined
 lxc.cap.drop:
 EOF
