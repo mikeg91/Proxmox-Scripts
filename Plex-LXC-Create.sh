@@ -1,9 +1,18 @@
 #!/bin/bash
-
-# Proxmox LXC Container Creation Script
-# Debian 12, unprivileged, Intel iGPU passthrough (VAAPI-safe)
-# Users can change defaults if wished.
-# Line 98 needs to be modified for your nfs share
+#
+#####
+# Proxmox LXC Container Creation Script optimized for Plex Media Server
+# Created buy mikeg91
+#
+# Notes to consider when using this script:
+# - This script will check if you have a deb 12 release template if not it will download the newest one for you
+# - This will make an unprivileged container with intel iGPU passthrough configured for VAAPI hardware transcoding
+# - Users can change defaults of the container if wished when prompted.
+# - Line 107 needs to be reviewed for your NFS Share bound to your Proxmox host
+# - The NFS share is mounted as read only.
+# If you wanted to host this yourself to make recovery easy, run the follwing command in your pve host to if it's posted in a public repo of yours in github.
+# bash -c "$(curl -fsSL https://raw.githubusercontent.com/USERNAME/REPONAME/refs/heads/main/SCRIPTNAME.sh)"
+####
 
 set -e
 
