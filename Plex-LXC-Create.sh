@@ -2,7 +2,7 @@
 #
 #####
 # Proxmox LXC Container Creation Script optimized for Plex Media Server
-# Created buy mikeg91
+# Created buy mikeg91 - vibe coded with ChatGPT 
 #
 # Notes to consider when using this script:
 # - This script will check if you have a deb 12 release template if not it will download the newest one for you
