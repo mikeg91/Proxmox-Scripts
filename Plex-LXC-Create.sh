@@ -2,6 +2,8 @@
 
 # Proxmox LXC Container Creation Script
 # Debian 12, unprivileged, Intel iGPU passthrough (VAAPI-safe)
+# Users can change defaults if wished.
+# Line 98 needs to be modified for your nfs share
 
 set -e
 
