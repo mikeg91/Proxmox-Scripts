@@ -24,7 +24,7 @@ apt install -y unrar-free
 
 apt install -y nzbget
 
-nzbget -c /etc/nzbget.conf --configtemplate > /etc/nzbget.conf
+nzbget -o configtemplate > /etc/nzbget.conf
 
 cat <<'EOF' > /etc/systemd/system/nzbget.service
 [Unit]
