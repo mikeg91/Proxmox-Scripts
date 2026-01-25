@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+
+# If installed in deb, then cutl needs to be installed before
+# run apt update/grade and then the following 
+# apt install -y curl gnupg
+
+
 set -euo pipefail
 
 cat <<'EOF' > /etc/apt/sources.list
@@ -10,12 +16,6 @@ deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-fre
 deb-src http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware
 EOF
-
-apt update
-
-apt upgrade -y
-
-apt install -y curl gnupg
 
 curl -fsSL https://nzbgetcom.github.io/nzbgetcom.asc | gpg --dearmor -o /etc/apt/keyrings/nzbgetcom.gpg
 
