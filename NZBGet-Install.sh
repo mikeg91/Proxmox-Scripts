@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-
-# If installed in deb, then cutl needs to be installed before
-# run apt update/grade and then the following 
-# apt install -y curl gnupg
-
-
+# Prerequisites: curl and gnupg must be installed before running this script
 set -euo pipefail
 
 cat <<'EOF' > /etc/apt/sources.list
