@@ -108,7 +108,46 @@ print_info "Upgrading existing packages (this may take a few minutes)..."
 apt upgrade -y
 
 # ============================================================================
-# STEP 4: Install SABnzbd dependencies
+# STEP 4: Create sabnzbd user and directories BEFORE installation
+# ============================================================================
+print_info "Creating sabnzbd user and directory structure..."
+
+# Create the sabnzbd system user if it doesn't already exist
+# This is done BEFORE package installation to ensure proper setup
+if ! id "sabnzbd" &>/dev/null; then
+    print_info "Creating sabnzbd system user..."
+    useradd --system --shell /bin/false --no-create-home sabnzbd
+    print_info "User 'sabnzbd' created"
+else
+    print_info "User 'sabnzbd' already exists"
+fi
+
+# Create home directory structure for sabnzbd user
+# SABnzbd looks for config in the user's home directory by default
+print_info "Creating home directory for sabnzbd user..."
+mkdir -p /home/sabnzbd/.sabnzbd
+
+# Also create the alternative config location for flexibility
+mkdir -p /var/lib/sabnzbd/.sabnzbd
+
+# Set proper ownership NOW, before installation
+# This prevents permission errors on first startup
+chown -R sabnzbd:sabnzbd /home/sabnzbd
+chown -R sabnzbd:sabnzbd /var/lib/sabnzbd
+
+# Verify permissions are correct
+print_info "Verifying directory permissions..."
+if [ "$(stat -c '%U' /home/sabnzbd)" = "sabnzbd" ]; then
+    print_info "Permissions set correctly"
+else
+    print_error "Failed to set proper permissions!"
+    exit 1
+fi
+
+print_info "User and directory setup complete"
+
+# ============================================================================
+# STEP 5: Install SABnzbd dependencies
 # ============================================================================
 print_info "Installing SABnzbd dependencies..."
 
@@ -131,45 +170,19 @@ apt install -y unzip
 print_info "All dependencies installed successfully"
 
 # ============================================================================
-# STEP 5: Install SABnzbd from Debian Backports
+# STEP 6: Install SABnzbd from Debian Backports
 # ============================================================================
 print_info "Installing SABnzbd from Debian Backports..."
 print_info "This ensures you get a recent, supported version"
 
 # Install from backports repository with -y flag to avoid prompts
+# The user and directories already exist, so no permission issues should occur
 apt install -t bookworm-backports sabnzbdplus -y
 
-print_info "SABnzbd installed successfully"
+print_info "SABnzbd package installed successfully"
 
 # ============================================================================
-# STEP 6: Verify sabnzbd user exists
-# ============================================================================
-print_info "Verifying sabnzbd user exists..."
-
-# The package should create this user automatically, but we verify
-if id "sabnzbd" &>/dev/null; then
-    print_info "User 'sabnzbd' exists"
-else
-    print_warning "User 'sabnzbd' does not exist, creating it now..."
-    useradd --system --shell /bin/false --no-create-home sabnzbd
-    print_info "User 'sabnzbd' created"
-fi
-
-# ============================================================================
-# STEP 7: Create required directories with proper permissions
-# ============================================================================
-print_info "Creating SABnzbd configuration directories..."
-
-# Create the home directory and config directory for sabnzbd
-mkdir -p /var/lib/sabnzbd/.sabnzbd
-
-# Set ownership to sabnzbd user and group
-chown -R sabnzbd:sabnzbd /var/lib/sabnzbd
-
-print_info "Directories created and permissions set"
-
-# ============================================================================
-# STEP 8: Create systemd service file
+# STEP 7: Create systemd service file
 # ============================================================================
 print_info "Creating systemd service file..."
 
@@ -193,7 +206,7 @@ EOF
 print_info "Systemd service file created"
 
 # ============================================================================
-# STEP 9: Enable and start SABnzbd service
+# STEP 8: Enable and start SABnzbd service
 # ============================================================================
 print_info "Configuring SABnzbd to start on boot..."
 
@@ -207,10 +220,10 @@ print_info "Starting SABnzbd service..."
 systemctl start sabnzbd
 
 # Wait a moment for service to start
-sleep 2
+sleep 5
 
 # ============================================================================
-# STEP 10: Verify installation
+# STEP 9: Verify installation
 # ============================================================================
 print_info "Verifying SABnzbd service status..."
 
