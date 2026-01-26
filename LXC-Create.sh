@@ -103,8 +103,8 @@ pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
     --start 0
 
 ### Add NFS mount from Proxmox host
-echo -e "${GREEN}Adding NFS mount (read-only)...${NC}"
-pct set "$CTID" -mp0 /mnt/pve/synology,mp=/synology,ro=1
+#echo -e "${GREEN}Adding NFS mount (read-only)...${NC}"
+#pct set "$CTID" -mp0 /mnt/pve/synology,mp=/synology,ro=1
 
 ### iGPU passthrough configuration
 echo -e "${GREEN}Configuring Intel iGPU passthrough...${NC}"
