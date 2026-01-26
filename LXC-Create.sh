@@ -2,7 +2,7 @@
 #
 #####
 # Proxmox LXC Container Creation Script optimized for Plex Media Server
-# Created buy mikeg91
+# Created by mikeg91
 #
 # Notes to consider when using this script:
 # - This script will check if you have a deb 12 release template if not it will download the newest one for you
@@ -10,7 +10,7 @@
 # - Users can change defaults of the container if wished when prompted.
 # - Line 107 needs to be reviewed for your NFS Share bound to your Proxmox host
 # - The NFS share is mounted as read only.
-# If you wanted to host this yourself to make recovery easy, run the follwing command in your pve host to if it's posted in a public repo of yours in github.
+# If you wanted to host this yourself to make recovery easy, run the following command in your pve host if it's posted in a public repo of yours in github.
 # bash -c "$(curl -fsSL https://raw.githubusercontent.com/USERNAME/REPONAME/refs/heads/main/SCRIPTNAME.sh)"
 ####
 
@@ -130,8 +130,16 @@ lxc.apparmor.profile: unconfined
 lxc.cap.drop:
 EOF
 
+### Start the container for configuration
+echo -e "${GREEN}Starting container for initial configuration...${NC}"
+pct start "$CTID"
+
+# Wait for container to fully start
+echo -e "${YELLOW}Waiting for container to initialize...${NC}"
+sleep 5
 
 # Configure sources.list
+echo -e "${GREEN}Configuring apt sources...${NC}"
 pct exec $CTID -- bash -c "cat > /etc/apt/sources.list << 'EOF'
 deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
 deb-src http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
@@ -144,6 +152,7 @@ EOF
 "
 
 # Now update and install packages
+echo -e "${GREEN}Updating system and installing packages...${NC}"
 pct exec $CTID -- bash -c "
   set -e
   export DEBIAN_FRONTEND=noninteractive
@@ -152,7 +161,7 @@ pct exec $CTID -- bash -c "
   apt install -y curl
 "
 
-echo "Successfully configured container $CTID"
+echo -e "${GREEN}Successfully configured container $CTID${NC}"
 
 ### Done
 echo ""
@@ -161,12 +170,10 @@ echo "Container ID: $CTID"
 echo "Hostname: $HOSTNAME"
 echo "Unprivileged: Yes"
 echo "iGPU Passthrough: Enabled"
+echo "Status: Running"
 echo ""
 echo -e "${GREEN}The container is fully configured for Plex hardware transcoding.${NC}"
 echo ""
-echo "You may now start the container with:"
-echo "  pct start $CTID"
-echo ""
-echo "GPU devices will be available inside the container at:"
+echo "GPU devices are available inside the container at:"
 echo "  /dev/dri"
-echo -e "${GREEN}Verify GPU access with: ls -l /dev/dri${NC}"
+echo -e "${GREEN}Verify GPU access with: pct exec $CTID -- ls -l /dev/dri${NC}"
