@@ -318,6 +318,26 @@ if [ "$IS_PLEX" = true ]; then
       apt install -y intel-media-va-driver-non-free vainfo
     "
     echo -e "${GREEN}Intel VA-API drivers installed${NC}"
+    
+    # Add Plex repository
+    echo -e "${GREEN}Adding Plex Media Server repository...${NC}"
+    pct exec $CTID -- bash -c "
+      set -e
+      # Add Plex PGP key
+      curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.key | gpg --dearmor | tee /usr/share/keyrings/plex.gpg > /dev/null
+      # Add Plex repository
+      echo 'deb [signed-by=/usr/share/keyrings/plex.gpg] https://downloads.plex.tv/repo/deb public main' > /etc/apt/sources.list.d/plexmediaserver.list
+    "
+    echo -e "${GREEN}Plex repository added${NC}"
+    
+    # Update apt after adding Plex repository
+    echo -e "${GREEN}Updating package lists with Plex repository...${NC}"
+    pct exec $CTID -- bash -c "
+      set -e
+      export DEBIAN_FRONTEND=noninteractive
+      apt update
+    "
+    echo -e "${GREEN}Package lists updated${NC}"
 fi
 
 echo -e "${GREEN}Successfully configured container $CTID${NC}"
@@ -332,10 +352,14 @@ echo "Unprivileged: Yes"
 if [ "$IS_PLEX" = true ]; then
     echo "Plex Server: Yes"
     echo "iGPU Passthrough: Enabled"
+    echo "Plex Repository: Configured"
     echo ""
     echo "GPU devices are available inside the container at:"
     echo "  /dev/dri"
     echo -e "${GREEN}Verify GPU access with: pct exec $CTID -- ls -l /dev/dri${NC}"
+    echo ""
+    echo -e "${YELLOW}To install Plex Media Server, run:${NC}"
+    echo -e "${YELLOW}  pct exec $CTID -- apt install plexmediaserver${NC}"
 fi
 
 if [ ${#SELECTED_MOUNTS[@]} -gt 0 ]; then
