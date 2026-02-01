@@ -306,8 +306,19 @@ pct exec $CTID -- bash -c "
   export DEBIAN_FRONTEND=noninteractive
   apt update
   apt upgrade -y
-  apt install -y curl
+  apt install -y curl gnupg
 "
+
+# Install Plex-specific packages if this is a Plex server
+if [ "$IS_PLEX" = true ]; then
+    echo -e "${GREEN}Installing Plex hardware transcoding packages...${NC}"
+    pct exec $CTID -- bash -c "
+      set -e
+      export DEBIAN_FRONTEND=noninteractive
+      apt install -y intel-media-va-driver-non-free vainfo
+    "
+    echo -e "${GREEN}Intel VA-API drivers installed${NC}"
+fi
 
 echo -e "${GREEN}Successfully configured container $CTID${NC}"
 
