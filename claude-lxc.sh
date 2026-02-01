@@ -105,11 +105,34 @@ fi
 echo ""
 echo -e "${BLUE}=== Discovering Mount Points on PVE Host ===${NC}"
 
-# Find all mounted directories excluding system mounts
+# Read mount points from /etc/fstab (NFS, CIFS, and other network mounts)
 MOUNT_POINTS=()
 while IFS= read -r line; do
-    MOUNT_POINTS+=("$line")
-done < <(mount | grep -E '^(/dev/|.+:/|//)' | awk '{print $3}' | grep -v -E '^(/|/boot|/dev|/proc|/sys|/run|/tmp|/var/lib/lxc)' | sort)
+    # Skip comments and empty lines
+    [[ "$line" =~ ^#.*$ ]] && continue
+    [[ -z "$line" ]] && continue
+    
+    # Parse fstab line: device mountpoint fstype options dump pass
+    read -r device mountpoint fstype rest <<< "$line"
+    
+    # Skip if no mountpoint
+    [[ -z "$mountpoint" ]] && continue
+    
+    # Skip system mounts (swap, proc, tmpfs, devpts, sysfs, etc.)
+    [[ "$fstype" =~ ^(swap|proc|tmpfs|devpts|sysfs|devtmpfs|cgroup.*|securityfs|debugfs|configfs|fusectl|pstore|bpf|tracefs|hugetlbfs|mqueue|autofs)$ ]] && continue
+    
+    # Skip root and boot partitions
+    [[ "$mountpoint" =~ ^(/|/boot.*)$ ]] && continue
+    
+    # Add the mount point
+    MOUNT_POINTS+=("$mountpoint")
+done < /etc/fstab
+
+# Sort and remove duplicates
+if [ ${#MOUNT_POINTS[@]} -gt 0 ]; then
+    IFS=$'\n' MOUNT_POINTS=($(sort -u <<<"${MOUNT_POINTS[*]}"))
+    unset IFS
+fi
 
 if [ ${#MOUNT_POINTS[@]} -eq 0 ]; then
     echo -e "${YELLOW}No additional mount points found on the host${NC}"
@@ -228,10 +251,8 @@ if [ "$IS_PLEX" = true ]; then
         cat >> "$CONFIG_FILE" << EOF
 
 # Intel iGPU passthrough (Auto-detected)
-dev0: /dev/dri/renderD128,gid=993,mode=0666
-dev1: $DETECTED_CARD,gid=44,mode=0666
-lxc.apparmor.profile: unconfined
-lxc.cap.drop:
+dev0: /dev/dri/renderD128,gid=44,uid=100000,mode=0660
+dev1: $DETECTED_CARD,gid=44,uid=100000,mode=0660
 EOF
         echo -e "${GREEN}GPU passthrough configured${NC}"
     fi
@@ -286,7 +307,6 @@ pct exec $CTID -- bash -c "
   apt update
   apt upgrade -y
   apt install -y curl
-  apt install -y gnupg
 "
 
 echo -e "${GREEN}Successfully configured container $CTID${NC}"
