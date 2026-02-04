@@ -306,44 +306,23 @@ pct exec $CTID -- bash -c "
   export DEBIAN_FRONTEND=noninteractive
   apt update
   apt upgrade -y
-  apt install -y curl gnupg
-"
+  apt install -y curl gnupg unattended-upgrades apt-listchanges
 
-###############################################################################
-# Configure unattended upgrades
-# - Installs unattended-upgrades
-# - Runs daily via systemd timers
-# - Allows ONLY Debian base + security updates
-# - Blocks all third-party repositories
-# - No automatic reboots
-###############################################################################
+  # Enable automatic security updates
+  dpkg-reconfigure -f noninteractive unattended-upgrades
 
-echo -e "${GREEN}Configuring unattended OS security updates...${NC}"
-pct exec $CTID -- bash -c "
-  set -e
-  export DEBIAN_FRONTEND=noninteractive
-
-  # Install unattended-upgrades
-  apt install -y unattended-upgrades apt-listchanges
-
-  # Enable unattended upgrades
-  echo 'unattended-upgrades unattended-upgrades/enable_auto_updates boolean true' | debconf-set-selections
-
-  # Allow ONLY Debian OS + security repositories
-  cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
-Unattended-Upgrade::Allowed-Origins {
-        \"\${distro_id}:\${distro_codename}-security\";
-        \"\${distro_id}:\${distro_codename}-updates\";
-};
-Unattended-Upgrade::Automatic-Reboot \"false\";
-EOF
-
-  # Run unattended upgrades once per day
-  cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+  # Configure periodic automatic upgrades
+  cat <<'EOF' > /etc/apt/apt.conf.d/20auto-upgrades
 APT::Periodic::Update-Package-Lists \"1\";
+APT::Periodic::Download-Upgradeable-Packages \"1\";
+APT::Periodic::AutocleanInterval \"7\";
 APT::Periodic::Unattended-Upgrade \"1\";
 EOF
+
+  # Log unattended-upgrades output to syslog
+  sed -i 's|//Unattended-Upgrade::SyslogEnable \"false\";|Unattended-Upgrade::SyslogEnable \"true\";|' /etc/apt/apt.conf.d/50unattended-upgrades
 "
+
 
 # Install Plex-specific packages if this is a Plex server
 if [ "$IS_PLEX" = true ]; then
