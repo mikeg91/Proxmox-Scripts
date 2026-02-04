@@ -306,40 +306,44 @@ pct exec $CTID -- bash -c "
   export DEBIAN_FRONTEND=noninteractive
   apt update
   apt upgrade -y
-  apt install -y curl gnupg unattended-upgrades apt-listchanges
+  apt install -y curl gnupg
 "
 
-# Configure and enable unattended-upgrades
-echo -e "${GREEN}Configuring unattended-upgrades...${NC}"
+###############################################################################
+# Configure unattended upgrades
+# - Installs unattended-upgrades
+# - Runs daily via systemd timers
+# - Allows ONLY Debian base + security updates
+# - Blocks all third-party repositories
+# - No automatic reboots
+###############################################################################
+
+echo -e "${GREEN}Configuring unattended OS security updates...${NC}"
 pct exec $CTID -- bash -c "
   set -e
-  # Enable automatic security updates
-  cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
-APT::Periodic::Update-Package-Lists \"1\";
-APT::Periodic::Unattended-Upgrade \"1\";
-APT::Periodic::AutocleanInterval \"7\";
-EOF
+  export DEBIAN_FRONTEND=noninteractive
 
-  # Configure unattended-upgrades to only install security updates
+  # Install unattended-upgrades
+  apt install -y unattended-upgrades apt-listchanges
+
+  # Enable unattended upgrades
+  echo 'unattended-upgrades unattended-upgrades/enable_auto_updates boolean true' | debconf-set-selections
+
+  # Allow ONLY Debian OS + security repositories
   cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
-Unattended-Upgrade::Origins-Pattern {
-    \"origin=Debian,codename=\${distro_codename}-security,label=Debian-Security\";
-    \"origin=Debian,codename=\${distro_codename},label=Debian\";
+Unattended-Upgrade::Allowed-Origins {
+        \"\${distro_id}:\${distro_codename}-security\";
+        \"\${distro_id}:\${distro_codename}-updates\";
 };
-
-Unattended-Upgrade::AutoFixInterruptedDpkg \"true\";
-Unattended-Upgrade::MinimalSteps \"true\";
-Unattended-Upgrade::Remove-Unused-Kernel-Packages \"true\";
-Unattended-Upgrade::Remove-Unused-Dependencies \"true\";
 Unattended-Upgrade::Automatic-Reboot \"false\";
 EOF
 
-  # Enable the service
-  systemctl enable unattended-upgrades
-  systemctl start unattended-upgrades
+  # Run unattended upgrades once per day
+  cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+APT::Periodic::Update-Package-Lists \"1\";
+APT::Periodic::Unattended-Upgrade \"1\";
+EOF
 "
-
-echo -e "${GREEN}Unattended-upgrades enabled for automatic security updates${NC}"
 
 # Install Plex-specific packages if this is a Plex server
 if [ "$IS_PLEX" = true ]; then
@@ -360,7 +364,6 @@ echo -e "${GREEN}=== Configuration Complete ===${NC}"
 echo "Container ID: $CTID"
 echo "Hostname: $HOSTNAME"
 echo "Unprivileged: Yes"
-echo "Unattended Upgrades: Enabled (security updates only)"
 
 if [ "$IS_PLEX" = true ]; then
     echo "Plex Server: Yes"
