@@ -226,36 +226,95 @@ if [ "$NEEDS_NFS_MAPPING" = true ]; then
     # Backup original config
     cp "/etc/pve/lxc/${CTID}.conf" "/etc/pve/lxc/${CTID}.conf.bak"
     
-    # Calculate the ranges for ID mapping
-    # Map container UID/GID 0 to NFS_UID-1 to host 100000 to 100000+NFS_UID-1
-    # Map container NFS_UID to host NFS_UID (direct mapping)
-    # Map container NFS_UID+1 to 65535 to host 100000+NFS_UID+1 onwards
+    # Create proper non-overlapping ID mappings
+    # Strategy: Split the container's ID space around the NFS UID/GID
     
-    if [ "$NFS_UID" -gt 0 ]; then
-        RANGE1_SIZE=$NFS_UID
-        RANGE2_START=$((NFS_UID + 1))
-        RANGE2_HOST_START=$((100000 + NFS_UID + 1))
-        RANGE2_SIZE=$((65536 - NFS_UID - 1))
-        
-        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: u 0 100000 $RANGE1_SIZE
-lxc.idmap: g 0 100000 $RANGE1_SIZE
-lxc.idmap: u $NFS_UID $NFS_UID 1
-lxc.idmap: g $NFS_GID $NFS_GID 1
-lxc.idmap: u $RANGE2_START $RANGE2_HOST_START $RANGE2_SIZE
-lxc.idmap: g $RANGE2_START $RANGE2_HOST_START $RANGE2_SIZE
-EOF
-    else
-        # If NFS_UID is 0, just do direct mapping for UID 0
+    if [ "$NFS_UID" -eq 0 ] && [ "$NFS_GID" -eq 0 ]; then
+        # Special case: NFS uses root (UID/GID 0)
+        # Map container 0 to host 0, rest to unprivileged range
         cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
 lxc.idmap: u 0 0 1
 lxc.idmap: g 0 0 1
 lxc.idmap: u 1 100001 65535
 lxc.idmap: g 1 100001 65535
 EOF
+    elif [ "$NFS_UID" -eq "$NFS_GID" ]; then
+        # Common case: NFS UID and GID are the same
+        # Split into three ranges: before, at, and after the NFS ID
+        
+        if [ "$NFS_UID" -gt 0 ]; then
+            # Range 1: container 0 to NFS_UID-1 → host 100000 to 100000+NFS_UID-1
+            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: u 0 100000 $NFS_UID
+lxc.idmap: g 0 100000 $NFS_UID
+EOF
+        fi
+        
+        # Range 2: container NFS_UID → host NFS_UID (direct mapping)
+        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: u $NFS_UID $NFS_UID 1
+lxc.idmap: g $NFS_GID $NFS_GID 1
+EOF
+        
+        # Range 3: container NFS_UID+1 to 65535 → host 100000+NFS_UID to end
+        RANGE3_START=$((NFS_UID + 1))
+        RANGE3_HOST_START=$((100000 + NFS_UID))
+        RANGE3_SIZE=$((65536 - NFS_UID - 1))
+        
+        if [ "$RANGE3_SIZE" -gt 0 ]; then
+            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: u $RANGE3_START $RANGE3_HOST_START $RANGE3_SIZE
+lxc.idmap: g $RANGE3_START $RANGE3_HOST_START $RANGE3_SIZE
+EOF
+        fi
+    else
+        # Different NFS_UID and NFS_GID - handle separately
+        # This is more complex but handles edge cases
+        
+        # UID mapping
+        if [ "$NFS_UID" -gt 0 ]; then
+            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: u 0 100000 $NFS_UID
+EOF
+        fi
+        
+        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: u $NFS_UID $NFS_UID 1
+EOF
+        
+        RANGE3_START=$((NFS_UID + 1))
+        RANGE3_HOST_START=$((100000 + NFS_UID))
+        RANGE3_SIZE=$((65536 - NFS_UID - 1))
+        
+        if [ "$RANGE3_SIZE" -gt 0 ]; then
+            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: u $RANGE3_START $RANGE3_HOST_START $RANGE3_SIZE
+EOF
+        fi
+        
+        # GID mapping
+        if [ "$NFS_GID" -gt 0 ]; then
+            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: g 0 100000 $NFS_GID
+EOF
+        fi
+        
+        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: g $NFS_GID $NFS_GID 1
+EOF
+        
+        RANGE3_START=$((NFS_GID + 1))
+        RANGE3_HOST_START=$((100000 + NFS_GID))
+        RANGE3_SIZE=$((65536 - NFS_GID - 1))
+        
+        if [ "$RANGE3_SIZE" -gt 0 ]; then
+            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: g $RANGE3_START $RANGE3_HOST_START $RANGE3_SIZE
+EOF
+        fi
     fi
     
-    # Update subuid/subgid on host to allow this mapping
+    # Update subuid/subgid on host to allow direct mapping
     if ! grep -q "root:$NFS_UID:1" /etc/subuid 2>/dev/null; then
         echo "root:$NFS_UID:1" >> /etc/subuid
     fi
@@ -264,6 +323,7 @@ EOF
     fi
     
     echo -e "${GREEN}UID/GID mapping configured: Container UID/GID $NFS_UID <-> Host UID/GID $NFS_UID${NC}"
+    echo -e "${YELLOW}Mapping details written to /etc/pve/lxc/${CTID}.conf${NC}"
 fi
 
 ### STEP 2: Boot to create directories
