@@ -129,15 +129,57 @@ if [ ${#MOUNT_POINTS[@]} -gt 0 ]; then
     fi
 fi
 
-# Ask for NFS UID/GID mapping if NFS mounts detected
+# Auto-detect NFS UID/GID mapping if NFS mounts detected
 NFS_UID=$DEFAULT_NFS_UID
 NFS_GID=$DEFAULT_NFS_GID
 if [ "$NEEDS_NFS_MAPPING" = true ]; then
     echo ""
-    echo -e "${YELLOW}NFS mount detected. Configure UID/GID mapping for proper permissions.${NC}"
-    echo "Check your NFS share ownership with: ls -ln /your/nfs/mount"
-    NFS_UID=$(prompt_input "NFS User ID (UID)" "$DEFAULT_NFS_UID")
-    NFS_GID=$(prompt_input "NFS Group ID (GID)" "$DEFAULT_NFS_GID")
+    echo -e "${YELLOW}NFS mount detected. Detecting UID/GID from mount points...${NC}"
+    
+    # Try to detect UID/GID from the first NFS mount point
+    DETECTED_UID=""
+    DETECTED_GID=""
+    for mount_info in "${SELECTED_MOUNTS[@]}"; do
+        IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "$mount_info"
+        if grep -q "^[^ ]* $HOST_PATH nfs" /etc/fstab 2>/dev/null; then
+            if [ -d "$HOST_PATH" ]; then
+                # Get UID/GID of a file/directory in the NFS mount
+                # Try to find a non-root owned file first, fallback to directory itself
+                SAMPLE_FILE=$(find "$HOST_PATH" -maxdepth 2 -type f -o -type d 2>/dev/null | grep -v "^$HOST_PATH$" | head -n 1)
+                if [ -z "$SAMPLE_FILE" ]; then
+                    SAMPLE_FILE="$HOST_PATH"
+                fi
+                
+                DETECTED_UID=$(stat -c '%u' "$SAMPLE_FILE" 2>/dev/null)
+                DETECTED_GID=$(stat -c '%g' "$SAMPLE_FILE" 2>/dev/null)
+                
+                if [ -n "$DETECTED_UID" ] && [ -n "$DETECTED_GID" ]; then
+                    echo -e "${GREEN}Auto-detected from $SAMPLE_FILE${NC}"
+                    echo -e "${GREEN}  UID: $DETECTED_UID${NC}"
+                    echo -e "${GREEN}  GID: $DETECTED_GID${NC}"
+                    break
+                fi
+            fi
+        fi
+    done
+    
+    # Use detected values as defaults
+    if [ -n "$DETECTED_UID" ]; then
+        NFS_UID=$DETECTED_UID
+    fi
+    if [ -n "$DETECTED_GID" ]; then
+        NFS_GID=$DETECTED_GID
+    fi
+    
+    echo ""
+    if prompt_yes_no "Use detected UID=$NFS_UID and GID=$NFS_GID?"; then
+        echo -e "${GREEN}Using UID=$NFS_UID, GID=$NFS_GID${NC}"
+    else
+        echo ""
+        echo -e "${YELLOW}Manual override - enter custom values:${NC}"
+        NFS_UID=$(prompt_input "NFS User ID (UID)" "$NFS_UID")
+        NFS_GID=$(prompt_input "NFS Group ID (GID)" "$NFS_GID")
+    fi
 fi
 
 echo ""
