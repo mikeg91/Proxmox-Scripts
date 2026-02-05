@@ -299,22 +299,26 @@ deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-fr
 EOF
 "
 
-# Update system, install packages, enable unattended-upgrades, and fix locales
+# Update system, install packages, enable unattended-upgrades, and fix locales (safe for LXC)
 echo -e "${GREEN}Updating system, installing packages, configuring unattended-upgrades, and fixing locales...${NC}"
 pct exec $CTID -- bash -c "
   set -e
   export DEBIAN_FRONTEND=noninteractive
 
-  # Update and upgrade existing packages
+  # Update and upgrade
   apt update
   apt upgrade -y
 
   # Install required packages
   apt install -y curl gnupg unattended-upgrades apt-listchanges locales
 
-  # Generate and configure en_US.UTF-8 locale to prevent Perl warnings
-  locale-gen en_US.UTF-8
-  update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+  # Generate en_US.UTF-8 locale
+  sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen || echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
+  locale-gen
+
+  # Configure LANG only (safe for LXC)
+  echo 'LANG=en_US.UTF-8' > /etc/default/locale
+  export LANG=en_US.UTF-8
 
   # Enable automatic security updates
   dpkg-reconfigure -f noninteractive unattended-upgrades
@@ -330,7 +334,7 @@ EOF
   # Log unattended-upgrades output to syslog
   sed -i 's|//Unattended-Upgrade::SyslogEnable \"false\";|Unattended-Upgrade::SyslogEnable \"true\";|' /etc/apt/apt.conf.d/50unattended-upgrades
 
-  # Verify locale setup
+  # Verify locale
   locale
 "
 
