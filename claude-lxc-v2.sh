@@ -299,14 +299,22 @@ deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-fr
 EOF
 "
 
-# Now update and install packages
-echo -e "${GREEN}Updating system and installing packages...${NC}"
+# Update system, install packages, enable unattended-upgrades, and fix locales
+echo -e "${GREEN}Updating system, installing packages, configuring unattended-upgrades, and fixing locales...${NC}"
 pct exec $CTID -- bash -c "
   set -e
   export DEBIAN_FRONTEND=noninteractive
+
+  # Update and upgrade existing packages
   apt update
   apt upgrade -y
-  apt install -y curl gnupg unattended-upgrades apt-listchanges
+
+  # Install required packages
+  apt install -y curl gnupg unattended-upgrades apt-listchanges locales
+
+  # Generate and configure en_US.UTF-8 locale to prevent Perl warnings
+  locale-gen en_US.UTF-8
+  update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
   # Enable automatic security updates
   dpkg-reconfigure -f noninteractive unattended-upgrades
@@ -321,7 +329,11 @@ EOF
 
   # Log unattended-upgrades output to syslog
   sed -i 's|//Unattended-Upgrade::SyslogEnable \"false\";|Unattended-Upgrade::SyslogEnable \"true\";|' /etc/apt/apt.conf.d/50unattended-upgrades
+
+  # Verify locale setup
+  locale
 "
+
 
 
 # Install Plex-specific packages if this is a Plex server
