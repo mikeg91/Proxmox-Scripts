@@ -134,7 +134,7 @@ if [[ ! -f "/var/lib/vz/template/cache/$TEMPLATE" ]]; then
     pveam update && pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
 fi
 
-### STEP 1: Create Container (With Nesting and Mount features enabled)
+### STEP 1: Create Container
 echo -e "${GREEN}Creating container with Nesting and Mount features...${NC}"
 pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
     --hostname "$HOSTNAME" \
@@ -205,12 +205,36 @@ EOF
 apt update && apt upgrade -y && apt install -y curl gnupg unattended-upgrades apt-listchanges
 "
 
+### Configure Unattended-Upgrades (Security Only, No Reboots)
+echo -e "${GREEN}Configuring unattended-upgrades...${NC}"
+pct exec $CTID -- bash -c "
+cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOFUU'
+Unattended-Upgrade::Origins-Pattern {
+    \"origin=Debian,codename=\${distro_codename}-security,label=Debian-Security\";
+};
+Unattended-Upgrade::Package-Blacklist { };
+Unattended-Upgrade::AutoFixInterruptedDpkg \"true\";
+Unattended-Upgrade::MinimalSteps \"true\";
+Unattended-Upgrade::InstallOnShutdown \"false\";
+Unattended-Upgrade::Remove-Unused-Dependencies \"true\";
+
+// Disable automatic reboots
+Unattended-Upgrade::Automatic-Reboot \"false\";
+EOFUU
+
+cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOFAU'
+APT::Periodic::Update-Package-Lists \"1\";
+APT::Periodic::Unattended-Upgrade \"1\";
+APT::Periodic::Download-Upgradeable-Packages \"1\";
+APT::Periodic::AutocleanInterval \"7\";
+EOFAU
+"
+
 # Install Plex drivers if needed
 if [ "$IS_PLEX" = true ]; then
     pct exec $CTID -- apt install -y intel-media-va-driver-non-free vainfo
 fi
 
 echo -e "${GREEN}=== Configuration Complete ===${NC}"
-echo "Container ID: $CTID | Hostname: $HOSTNAME"
-echo "Features: Nesting Enabled, Mount (NFS/CIFS) Support Enabled"
 echo "Status: Running"
+echo -e "${YELLOW}Note: Automatic reboots are DISABLED. Please check for reboot-required flags manually.${NC}"
