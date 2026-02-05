@@ -5,16 +5,9 @@
 # Created by mikeg91 - Enhanced version
 # Updated for Proxmox 9.1.5 compatibility
 #
-# Notes to consider when using this script:
-# - This script will check if you have a deb 12 release template if not it will download the newest one for you
-# - This will make an unprivileged container
-# - Users can configure GPU passthrough if this is a Plex server
-# - Users can select mount points from the Proxmox host to add to the container
-# - The script will create mount point directories before adding mounts (required for Proxmox 9.1.5+)
-# - Configures unattended-upgrades for Debian security updates only (does not auto-update third-party packages)
-# If you wanted to host this yourself to make recovery easy, run the following command in your pve host if it's posted in a public repo of yours in github.
-# bash -c "$(curl -fsSL https://raw.githubusercontent.com/USERNAME/REPONAME/refs/heads/main/SCRIPTNAME.sh)"
-#
+# Notes:
+# - Added nesting=1 for Debian 12/systemd compatibility on PVE 9.x
+# - Implemented Start-Stop-Set logic for mount point reliability
 ####
 
 set -e
@@ -107,30 +100,17 @@ fi
 echo ""
 echo -e "${BLUE}=== Discovering Mount Points on PVE Host ===${NC}"
 
-# Read mount points from /etc/fstab (NFS, CIFS, and other network mounts)
 MOUNT_POINTS=()
 while IFS= read -r line; do
-    # Skip comments and empty lines
     [[ "$line" =~ ^#.*$ ]] && continue
     [[ -z "$line" ]] && continue
-    
-    # Parse fstab line: device mountpoint fstype options dump pass
     read -r device mountpoint fstype rest <<< "$line"
-    
-    # Skip if no mountpoint
     [[ -z "$mountpoint" ]] && continue
-    
-    # Skip system mounts (swap, proc, tmpfs, devpts, sysfs, etc.)
     [[ "$fstype" =~ ^(swap|proc|tmpfs|devpts|sysfs|devtmpfs|cgroup.*|securityfs|debugfs|configfs|fusectl|pstore|bpf|tracefs|hugetlbfs|mqueue|autofs)$ ]] && continue
-    
-    # Skip root and boot partitions
     [[ "$mountpoint" =~ ^(/|/boot.*)$ ]] && continue
-    
-    # Add the mount point
     MOUNT_POINTS+=("$mountpoint")
 done < /etc/fstab
 
-# Sort and remove duplicates
 if [ ${#MOUNT_POINTS[@]} -gt 0 ]; then
     IFS=$'\n' MOUNT_POINTS=($(sort -u <<<"${MOUNT_POINTS[*]}"))
     unset IFS
@@ -148,38 +128,21 @@ else
     echo ""
     if prompt_yes_no "Would you like to add mount points to the container?"; then
         SELECTED_MOUNTS=()
-        
         while true; do
             echo ""
             read -p "Enter mount point number to add (or press Enter to finish): " selection
-            
-            if [[ -z "$selection" ]]; then
-                break
-            fi
-            
+            if [[ -z "$selection" ]]; then break; fi
             if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#MOUNT_POINTS[@]} ]; then
                 echo -e "${RED}Invalid selection${NC}"
                 continue
             fi
-            
             idx=$((selection-1))
             HOST_PATH="${MOUNT_POINTS[$idx]}"
-            
-            echo -e "${BLUE}Selected: $HOST_PATH${NC}"
-            
-            # Ask for container mount path
             DEFAULT_CONTAINER_PATH="/mnt/$(basename "$HOST_PATH")"
             CONTAINER_PATH=$(prompt_input "Container mount path" "$DEFAULT_CONTAINER_PATH")
-            
-            # Ask if read-only
-            if prompt_yes_no "Mount as read-only?"; then
-                READONLY=1
-            else
-                READONLY=0
-            fi
-            
+            if prompt_yes_no "Mount as read-only?"; then READONLY=1; else READONLY=0; fi
             SELECTED_MOUNTS+=("$HOST_PATH|$CONTAINER_PATH|$READONLY")
-            echo -e "${GREEN}Added: $HOST_PATH → $CONTAINER_PATH (ro=$READONLY)${NC}"
+            echo -e "${GREEN}Added: $HOST_PATH → $CONTAINER_PATH${NC}"
         done
     else
         SELECTED_MOUNTS=()
@@ -190,20 +153,13 @@ fi
 echo ""
 echo -e "${YELLOW}Resolving latest Debian 12 template...${NC}"
 TEMPLATE=$(pveam available --section system | awk '/debian-12-standard/ {print $2}' | tail -n1)
-
-if [[ -z "$TEMPLATE" ]]; then
-    echo -e "${RED}Failed to locate Debian 12 template${NC}"
-    exit 1
-fi
-
 if [[ ! -f "/var/lib/vz/template/cache/$TEMPLATE" ]]; then
     echo -e "${YELLOW}Downloading $TEMPLATE...${NC}"
-    pveam update
-    pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
+    pveam update && pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
 fi
 
-### Create container
-echo -e "${GREEN}Creating container...${NC}"
+### Create container with Nesting enabled
+echo -e "${GREEN}Creating container with nesting enabled...${NC}"
 pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
     --hostname "$HOSTNAME" \
     --cores "$CORES" \
@@ -212,185 +168,74 @@ pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
     --rootfs "$STORAGE:$DISK_SIZE" \
     --net0 name=eth0,bridge="$NETWORK_BRIDGE",firewall=1,ip=dhcp \
     --unprivileged 1 \
+    --features "nesting=1" \
     --password "$PASSWORD" \
     --start 0
 
-### iGPU passthrough configuration (only if Plex)
+### iGPU passthrough configuration
 if [ "$IS_PLEX" = true ]; then
-    echo -e "${GREEN}Configuring Intel iGPU passthrough for Plex...${NC}"
-    CONFIG_FILE="/etc/pve/lxc/${CTID}.conf"
-
-    # Logic to find the correct card node (card0 or card1)
     DETECTED_CARD=$(ls /dev/dri/card* 2>/dev/null | head -n 1)
-
-    if [[ -z "$DETECTED_CARD" ]]; then
-        echo -e "${RED}Warning: No GPU card node found in /dev/dri!${NC}"
-        echo -e "${YELLOW}Ensure your iGPU is enabled in BIOS and drivers are loaded on the host.${NC}"
-        echo -e "${YELLOW}Skipping GPU passthrough configuration.${NC}"
-    else
-        echo -e "${YELLOW}Detected GPU node: $DETECTED_CARD${NC}"
-
-        cat >> "$CONFIG_FILE" << EOF
-
-# Intel iGPU passthrough (Auto-detected)
+    if [[ -n "$DETECTED_CARD" ]]; then
+        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
 dev0: /dev/dri/renderD128,gid=44,uid=100000,mode=0660
 dev1: $DETECTED_CARD,gid=44,uid=100000,mode=0660
 EOF
-        echo -e "${GREEN}GPU passthrough configured${NC}"
     fi
 fi
 
-### Start container WITHOUT mount points first
-echo -e "${GREEN}Starting container for initial configuration...${NC}"
+### PHASE 1: Start container (No mounts yet, so it won't crash)
+echo -e "${GREEN}Starting container for directory creation...${NC}"
 pct start "$CTID"
+sleep 5
 
-echo -e "${YELLOW}Waiting for container to initialize...${NC}"
-sleep 10
-
-### Create mount point directories inside running container
+### PHASE 2: Create directories inside
 if [ ${#SELECTED_MOUNTS[@]} -gt 0 ]; then
-    echo -e "${GREEN}Creating mount point directories...${NC}"
-    
+    echo -e "${YELLOW}Creating destination directories inside container...${NC}"
     for mount_info in "${SELECTED_MOUNTS[@]}"; do
         IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "$mount_info"
         pct exec "$CTID" -- mkdir -p "$CONTAINER_PATH"
-        echo -e "${GREEN}Created directory: $CONTAINER_PATH${NC}"
     done
-    
-    ### NOW stop and add mount points
-    echo -e "${YELLOW}Stopping container to add mount points...${NC}"
+
+    ### PHASE 3: Stop container
+    echo -e "${YELLOW}Stopping container to apply mount configuration...${NC}"
     pct stop "$CTID"
-    sleep 5
     
-    echo -e "${GREEN}Adding mount points to container config...${NC}"
+    ### PHASE 4: Modify Config
+    echo -e "${GREEN}Applying mount points to configuration...${NC}"
     for i in "${!SELECTED_MOUNTS[@]}"; do
         IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "${SELECTED_MOUNTS[$i]}"
-        
-        echo -e "${YELLOW}Configuring: $HOST_PATH → $CONTAINER_PATH${NC}"
-        
         if [ "$READONLY" -eq 1 ]; then
             pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,ro=1"
         else
             pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH"
         fi
-        
-        echo -e "${GREEN}Added mount point $i${NC}"
     done
-    
-    echo -e "${YELLOW}Starting container with mount points...${NC}"
+
+    ### PHASE 5: Final Start
+    echo -e "${GREEN}Restarting container with mounts active...${NC}"
     pct start "$CTID"
-    sleep 10
+    sleep 5
 fi
 
-# Configure sources.list
-echo -e "${GREEN}Configuring apt sources...${NC}"
-pct exec $CTID -- bash -c "cat > /etc/apt/sources.list << 'EOF'
+# Configure apt sources and install updates
+echo -e "${GREEN}Finalizing system configuration...${NC}"
+pct exec $CTID -- bash -c "
+cat > /etc/apt/sources.list << 'EOF'
 deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-deb-src http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware
 EOF
+apt update && apt upgrade -y && apt install -y curl gnupg unattended-upgrades
 "
 
-# Update and install packages
-echo -e "${GREEN}Updating system and installing packages...${NC}"
-pct exec $CTID -- bash -c "
-  set -e
-  export DEBIAN_FRONTEND=noninteractive
-  apt update
-  apt upgrade -y
-  apt install -y curl gnupg unattended-upgrades apt-listchanges
-"
-
-# Configure unattended-upgrades (Debian security updates only)
-echo -e "${GREEN}Configuring unattended-upgrades...${NC}"
-pct exec $CTID -- bash -c "
-  # Configure to only update Debian security packages
-  cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOFUUPGRADE'
-Unattended-Upgrade::Origins-Pattern {
-    \"origin=Debian,codename=\${distro_codename}-security,label=Debian-Security\";
-};
-
-// Do not upgrade any other packages
-Unattended-Upgrade::Package-Blacklist {
-};
-
-// Automatically remove unused dependencies
-Unattended-Upgrade::Remove-Unused-Kernel-Packages \"true\";
-Unattended-Upgrade::Remove-New-Unused-Dependencies \"true\";
-Unattended-Upgrade::Remove-Unused-Dependencies \"true\";
-
-// Enable automatic reboots if required (at 2 AM)
-Unattended-Upgrade::Automatic-Reboot \"true\";
-Unattended-Upgrade::Automatic-Reboot-Time \"02:00\";
-
-// Send email notifications (configure email if needed)
-//Unattended-Upgrade::Mail \"root\";
-Unattended-Upgrade::MailReport \"on-change\";
-EOFUUPGRADE
-
-  # Enable automatic updates
-  cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOFAUTO'
-APT::Periodic::Update-Package-Lists \"1\";
-APT::Periodic::Unattended-Upgrade \"1\";
-APT::Periodic::Download-Upgradeable-Packages \"1\";
-APT::Periodic::AutocleanInterval \"7\";
-EOFAUTO
-
-  echo 'Unattended-upgrades configured for Debian security updates only'
-"
-echo -e "${GREEN}Unattended-upgrades configured${NC}"
-
-# Install Plex-specific packages if this is a Plex server
+# Install Plex-specific packages
 if [ "$IS_PLEX" = true ]; then
-    echo -e "${GREEN}Installing Plex hardware transcoding packages...${NC}"
-    pct exec $CTID -- bash -c "
-      set -e
-      export DEBIAN_FRONTEND=noninteractive
-      apt install -y intel-media-va-driver-non-free vainfo
-    "
-    echo -e "${GREEN}Intel VA-API drivers installed${NC}"
+    pct exec $CTID -- apt install -y intel-media-va-driver-non-free vainfo
 fi
 
-echo -e "${GREEN}Successfully configured container $CTID${NC}"
-
-### Done
-echo ""
 echo -e "${GREEN}=== Configuration Complete ===${NC}"
 echo "Container ID: $CTID"
-echo "Hostname: $HOSTNAME"
-echo "Unprivileged: Yes"
-echo "Unattended-Upgrades: Enabled (Debian security only)"
-
-if [ "$IS_PLEX" = true ]; then
-    echo "Plex Server: Yes"
-    echo "iGPU Passthrough: Enabled"
-    echo ""
-    echo "GPU devices are available inside the container at:"
-    echo "  /dev/dri"
-    echo -e "${GREEN}Verify GPU access with: pct exec $CTID -- ls -l /dev/dri${NC}"
-fi
-
+echo "Nesting: Enabled"
 if [ ${#SELECTED_MOUNTS[@]} -gt 0 ]; then
-    echo ""
-    echo "Mount Points:"
-    for mount_info in "${SELECTED_MOUNTS[@]}"; do
-        IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "$mount_info"
-        RO_TEXT=""
-        if [ "$READONLY" -eq 1 ]; then
-            RO_TEXT=" (read-only)"
-        fi
-        echo "  $HOST_PATH → $CONTAINER_PATH$RO_TEXT"
-    done
+    echo "Mount Points: ${#SELECTED_MOUNTS[@]} added successfully."
 fi
-
-echo ""
-echo "Status: Running"
-echo ""
-echo -e "${GREEN}Container is ready for use!${NC}"
-echo ""
-echo -e "${YELLOW}Note: Unattended-upgrades will only update Debian security packages.${NC}"
-echo -e "${YELLOW}Third-party software (like Plex) will NOT be automatically updated.${NC}"
