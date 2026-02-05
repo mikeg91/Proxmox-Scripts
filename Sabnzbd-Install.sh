@@ -155,9 +155,9 @@ print_info "Installing SABnzbd dependencies..."
 print_info "Installing par2 (for repairing downloads)..."
 apt install -y par2
 
-# unrar - Used for extracting RAR archives
-print_info "Installing unrar (for RAR extraction)..."
-apt install -y unrar
+# unrar-free - Used for extracting RAR archives
+print_info "Installing unrar-free (for RAR extraction)..."
+apt install -y unrar-free
 
 # p7zip-full - Used for 7z and other archive formats
 print_info "Installing p7zip-full (for 7z extraction)..."
