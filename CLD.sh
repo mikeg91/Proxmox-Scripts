@@ -2,8 +2,7 @@
 #
 #####
 # Proxmox LXC Container Creation Script
-# Created by mikeg91 - Enhanced version
-# Updated for Proxmox 9.1.5 compatibility
+# Updated for PVE 9.1.5 + NFS Bind Mount Compatibility
 #####
 
 set -e
@@ -52,7 +51,6 @@ echo -e "${GREEN}=== Proxmox LXC Container Creation ===${NC}"
 echo "Press Enter to accept defaults"
 echo ""
 
-### User input
 CTID=$(prompt_input "Container ID" "$DEFAULT_CTID")
 HOSTNAME=$(prompt_input "Hostname" "$DEFAULT_HOSTNAME")
 CORES=$(prompt_input "CPU Cores" "$DEFAULT_CORES")
@@ -63,7 +61,6 @@ STORAGE=$(prompt_input "Storage Pool" "$DEFAULT_STORAGE")
 TEMPLATE_STORAGE=$(prompt_input "Template Storage" "$DEFAULT_TEMPLATE_STORAGE")
 NETWORK_BRIDGE=$(prompt_input "Network Bridge" "$DEFAULT_NETWORK_BRIDGE")
 
-### Plex check
 echo ""
 if prompt_yes_no "Is this a Plex Media Server?"; then
     IS_PLEX=true
@@ -72,7 +69,6 @@ else
     IS_PLEX=false
 fi
 
-### Password entry
 echo ""
 read -s -p "Root Password: " PASSWORD
 echo
@@ -82,12 +78,10 @@ if [[ "$PASSWORD" != "$PASSWORD_CONFIRM" ]]; then
     echo -e "${RED}Passwords do not match${NC}"; exit 1
 fi
 
-### Check for existing CT
 if pct status "$CTID" &>/dev/null; then
     echo -e "${RED}Error: Container $CTID already exists${NC}"; exit 1
 fi
 
-### Discover available mount points
 echo ""
 echo -e "${BLUE}=== Discovering Host Mount Points ===${NC}"
 MOUNT_POINTS=()
@@ -125,7 +119,6 @@ if [ ${#MOUNT_POINTS[@]} -gt 0 ]; then
     fi
 fi
 
-### Resolve and download Template
 echo ""
 echo -e "${YELLOW}Resolving Debian 12 template...${NC}"
 TEMPLATE=$(pveam available --section system | awk '/debian-12-standard/ {print $2}' | tail -n1)
@@ -134,8 +127,8 @@ if [[ ! -f "/var/lib/vz/template/cache/$TEMPLATE" ]]; then
     pveam update && pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
 fi
 
-### STEP 1: Create Container
-echo -e "${GREEN}Creating container with Nesting and Mount features...${NC}"
+### STEP 1: Create Container (Clean)
+echo -e "${GREEN}Creating container...${NC}"
 pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
     --hostname "$HOSTNAME" \
     --cores "$CORES" \
@@ -148,7 +141,7 @@ pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
     --password "$PASSWORD" \
     --start 0
 
-### GPU Passthrough (Plex only)
+### GPU Passthrough
 if [ "$IS_PLEX" = true ]; then
     DETECTED_CARD=$(ls /dev/dri/card* 2>/dev/null | head -n 1)
     if [[ -n "$DETECTED_CARD" ]]; then
@@ -159,43 +152,41 @@ EOF
     fi
 fi
 
-### STEP 2: First Boot to create directories
+### STEP 2: Boot to create directories
 echo -e "${GREEN}Starting container for initial setup...${NC}"
 pct start "$CTID"
-echo -e "${YELLOW}Waiting for system to initialize (15s)...${NC}"
+echo -e "${YELLOW}Waiting for system to initialize...${NC}"
 sleep 15
 
 if [ ${#SELECTED_MOUNTS[@]} -gt 0 ]; then
-    echo -e "${GREEN}Creating destination directories inside container...${NC}"
     for mount_info in "${SELECTED_MOUNTS[@]}"; do
         IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "$mount_info"
         pct exec "$CTID" -- mkdir -p "$CONTAINER_PATH"
     done
 
-    ### STEP 3: Stop Container
-    echo -e "${YELLOW}Stopping container to apply mount points...${NC}"
+    ### STEP 3: Stop
+    echo -e "${YELLOW}Stopping to apply mounts with idmap=0...${NC}"
     pct stop "$CTID"
     sleep 5
 
-    ### STEP 4: Modify Config with Mount Points
-    echo -e "${GREEN}Applying mount points to configuration...${NC}"
+    ### STEP 4: Modify Config with idmap=0
     for i in "${!SELECTED_MOUNTS[@]}"; do
         IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "${SELECTED_MOUNTS[$i]}"
+        # Adding idmap=0 is the key for PVE 9.x NFS bind mounts
         if [ "$READONLY" -eq 1 ]; then
-            pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,ro=1"
+            pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,ro=1,idmap=0"
         else
-            pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH"
+            pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,idmap=0"
         fi
     done
 
     ### STEP 5: Final Start
-    echo -e "${GREEN}Restarting container with mounts active...${NC}"
+    echo -e "${GREEN}Restarting with mounts...${NC}"
     pct start "$CTID"
     sleep 5
 fi
 
-### System Configuration (APT and Updates)
-echo -e "${GREEN}Finalizing system configuration...${NC}"
+### APT and Unattended Upgrades
 pct exec $CTID -- bash -c "
 cat > /etc/apt/sources.list << 'EOF'
 deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
@@ -205,36 +196,23 @@ EOF
 apt update && apt upgrade -y && apt install -y curl gnupg unattended-upgrades apt-listchanges
 "
 
-### Configure Unattended-Upgrades (Security Only, No Reboots)
 echo -e "${GREEN}Configuring unattended-upgrades...${NC}"
 pct exec $CTID -- bash -c "
 cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOFUU'
-Unattended-Upgrade::Origins-Pattern {
-    \"origin=Debian,codename=\${distro_codename}-security,label=Debian-Security\";
-};
-Unattended-Upgrade::Package-Blacklist { };
+Unattended-Upgrade::Origins-Pattern { \"origin=Debian,codename=\${distro_codename}-security,label=Debian-Security\"; };
 Unattended-Upgrade::AutoFixInterruptedDpkg \"true\";
-Unattended-Upgrade::MinimalSteps \"true\";
-Unattended-Upgrade::InstallOnShutdown \"false\";
 Unattended-Upgrade::Remove-Unused-Dependencies \"true\";
-
-// Disable automatic reboots
 Unattended-Upgrade::Automatic-Reboot \"false\";
 EOFUU
 
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOFAU'
 APT::Periodic::Update-Package-Lists \"1\";
 APT::Periodic::Unattended-Upgrade \"1\";
-APT::Periodic::Download-Upgradeable-Packages \"1\";
-APT::Periodic::AutocleanInterval \"7\";
 EOFAU
 "
 
-# Install Plex drivers if needed
 if [ "$IS_PLEX" = true ]; then
     pct exec $CTID -- apt install -y intel-media-va-driver-non-free vainfo
 fi
 
-echo -e "${GREEN}=== Configuration Complete ===${NC}"
-echo "Status: Running"
-echo -e "${YELLOW}Note: Automatic reboots are DISABLED. Please check for reboot-required flags manually.${NC}"
+echo -e "${GREEN}=== Complete ===${NC}"
