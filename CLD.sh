@@ -3,6 +3,7 @@
 #####
 # Proxmox LXC Container Creation Script
 # Updated for PVE 9.1.5 + NFS Bind Mount Compatibility
+# Includes UID/GID mapping for NFS shares
 #####
 
 set -e
@@ -17,6 +18,8 @@ DEFAULT_DISK_SIZE=8
 DEFAULT_STORAGE="local-lvm"
 DEFAULT_TEMPLATE_STORAGE="local"
 DEFAULT_NETWORK_BRIDGE="vmbr0"
+DEFAULT_NFS_UID=1000
+DEFAULT_NFS_GID=1000
 
 ### Prompt functions
 prompt_input() {
@@ -96,6 +99,8 @@ while IFS= read -r line; do
 done < /etc/fstab
 
 SELECTED_MOUNTS=()
+NEEDS_NFS_MAPPING=false
+
 if [ ${#MOUNT_POINTS[@]} -gt 0 ]; then
     IFS=$'\n' MOUNT_POINTS=($(sort -u <<<"${MOUNT_POINTS[*]}")); unset IFS
     echo "Available mount points on the host:"
@@ -115,8 +120,24 @@ if [ ${#MOUNT_POINTS[@]} -gt 0 ]; then
             CONTAINER_PATH=$(prompt_input "Container mount path" "$DEFAULT_CONTAINER_PATH")
             if prompt_yes_no "Mount as read-only?"; then READONLY=1; else READONLY=0; fi
             SELECTED_MOUNTS+=("$HOST_PATH|$CONTAINER_PATH|$READONLY")
+            
+            # Check if this is an NFS mount
+            if grep -q "^[^ ]* $HOST_PATH nfs" /etc/fstab 2>/dev/null; then
+                NEEDS_NFS_MAPPING=true
+            fi
         done
     fi
+fi
+
+# Ask for NFS UID/GID mapping if NFS mounts detected
+NFS_UID=$DEFAULT_NFS_UID
+NFS_GID=$DEFAULT_NFS_GID
+if [ "$NEEDS_NFS_MAPPING" = true ]; then
+    echo ""
+    echo -e "${YELLOW}NFS mount detected. Configure UID/GID mapping for proper permissions.${NC}"
+    echo "Check your NFS share ownership with: ls -ln /your/nfs/mount"
+    NFS_UID=$(prompt_input "NFS User ID (UID)" "$DEFAULT_NFS_UID")
+    NFS_GID=$(prompt_input "NFS Group ID (GID)" "$DEFAULT_NFS_GID")
 fi
 
 echo ""
@@ -152,6 +173,57 @@ EOF
     fi
 fi
 
+### STEP 1.5: Configure UID/GID mapping for NFS compatibility
+if [ "$NEEDS_NFS_MAPPING" = true ]; then
+    echo -e "${GREEN}Configuring UID/GID mapping for NFS...${NC}"
+    
+    # Stop container if running
+    pct stop "$CTID" 2>/dev/null || true
+    sleep 2
+    
+    # Backup original config
+    cp "/etc/pve/lxc/${CTID}.conf" "/etc/pve/lxc/${CTID}.conf.bak"
+    
+    # Calculate the ranges for ID mapping
+    # Map container UID/GID 0 to NFS_UID-1 to host 100000 to 100000+NFS_UID-1
+    # Map container NFS_UID to host NFS_UID (direct mapping)
+    # Map container NFS_UID+1 to 65535 to host 100000+NFS_UID+1 onwards
+    
+    if [ "$NFS_UID" -gt 0 ]; then
+        RANGE1_SIZE=$NFS_UID
+        RANGE2_START=$((NFS_UID + 1))
+        RANGE2_HOST_START=$((100000 + NFS_UID + 1))
+        RANGE2_SIZE=$((65536 - NFS_UID - 1))
+        
+        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: u 0 100000 $RANGE1_SIZE
+lxc.idmap: g 0 100000 $RANGE1_SIZE
+lxc.idmap: u $NFS_UID $NFS_UID 1
+lxc.idmap: g $NFS_GID $NFS_GID 1
+lxc.idmap: u $RANGE2_START $RANGE2_HOST_START $RANGE2_SIZE
+lxc.idmap: g $RANGE2_START $RANGE2_HOST_START $RANGE2_SIZE
+EOF
+    else
+        # If NFS_UID is 0, just do direct mapping for UID 0
+        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
+lxc.idmap: u 0 0 1
+lxc.idmap: g 0 0 1
+lxc.idmap: u 1 100001 65535
+lxc.idmap: g 1 100001 65535
+EOF
+    fi
+    
+    # Update subuid/subgid on host to allow this mapping
+    if ! grep -q "root:$NFS_UID:1" /etc/subuid 2>/dev/null; then
+        echo "root:$NFS_UID:1" >> /etc/subuid
+    fi
+    if ! grep -q "root:$NFS_GID:1" /etc/subgid 2>/dev/null; then
+        echo "root:$NFS_GID:1" >> /etc/subgid
+    fi
+    
+    echo -e "${GREEN}UID/GID mapping configured: Container UID/GID $NFS_UID <-> Host UID/GID $NFS_UID${NC}"
+fi
+
 ### STEP 2: Boot to create directories
 echo -e "${GREEN}Starting container for initial setup...${NC}"
 pct start "$CTID"
@@ -165,18 +237,27 @@ if [ ${#SELECTED_MOUNTS[@]} -gt 0 ]; then
     done
 
     ### STEP 3: Stop
-    echo -e "${YELLOW}Stopping to apply mounts with idmap=0...${NC}"
+    echo -e "${YELLOW}Stopping to apply mounts...${NC}"
     pct stop "$CTID"
     sleep 5
 
-    ### STEP 4: Modify Config with idmap=0
+    ### STEP 4: Modify Config with mounts
     for i in "${!SELECTED_MOUNTS[@]}"; do
         IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "${SELECTED_MOUNTS[$i]}"
-        # Adding idmap=0 is the key for PVE 9.x NFS bind mounts
-        if [ "$READONLY" -eq 1 ]; then
-            pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,ro=1,idmap=0"
+        # For NFS with UID mapping, we don't need idmap=0
+        if [ "$NEEDS_NFS_MAPPING" = true ]; then
+            if [ "$READONLY" -eq 1 ]; then
+                pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,ro=1"
+            else
+                pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH"
+            fi
         else
-            pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,idmap=0"
+            # For non-NFS mounts, use idmap=0
+            if [ "$READONLY" -eq 1 ]; then
+                pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,ro=1,idmap=0"
+            else
+                pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,idmap=0"
+            fi
         fi
     done
 
@@ -216,3 +297,10 @@ if [ "$IS_PLEX" = true ]; then
 fi
 
 echo -e "${GREEN}=== Complete ===${NC}"
+echo ""
+if [ "$NEEDS_NFS_MAPPING" = true ]; then
+    echo -e "${YELLOW}Note: UID/GID mapping applied for NFS compatibility${NC}"
+    echo -e "${YELLOW}Container UID/GID $NFS_UID maps directly to host UID/GID $NFS_UID${NC}"
+    echo ""
+fi
+echo -e "${GREEN}Container $CTID ($HOSTNAME) is ready!${NC}"
