@@ -139,24 +139,42 @@ if [ "$NEEDS_NFS_MAPPING" = true ]; then
     # Try to detect UID/GID from the first NFS mount point
     DETECTED_UID=""
     DETECTED_GID=""
+    DETECTED_ADDITIONAL_GIDS=()
+    
     for mount_info in "${SELECTED_MOUNTS[@]}"; do
         IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "$mount_info"
         if grep -q "^[^ ]* $HOST_PATH nfs" /etc/fstab 2>/dev/null; then
             if [ -d "$HOST_PATH" ]; then
-                # Get UID/GID of a file/directory in the NFS mount
-                # Try to find a non-root owned file first, fallback to directory itself
-                SAMPLE_FILE=$(find "$HOST_PATH" -maxdepth 2 -type f -o -type d 2>/dev/null | grep -v "^$HOST_PATH$" | head -n 1)
-                if [ -z "$SAMPLE_FILE" ]; then
-                    SAMPLE_FILE="$HOST_PATH"
-                fi
+                echo -e "${BLUE}Scanning $HOST_PATH for ownership...${NC}"
                 
-                DETECTED_UID=$(stat -c '%u' "$SAMPLE_FILE" 2>/dev/null)
-                DETECTED_GID=$(stat -c '%g' "$SAMPLE_FILE" 2>/dev/null)
+                # Collect unique UIDs and GIDs from files in the NFS share
+                FOUND_UIDS=$(find "$HOST_PATH" -maxdepth 3 2>/dev/null | head -n 20 | xargs -r stat -c '%u' 2>/dev/null | sort -u)
+                FOUND_GIDS=$(find "$HOST_PATH" -maxdepth 3 2>/dev/null | head -n 20 | xargs -r stat -c '%g' 2>/dev/null | sort -u)
+                
+                # Use the most common non-root UID (or first found)
+                for uid in $FOUND_UIDS; do
+                    if [ "$uid" != "0" ] && [ -z "$DETECTED_UID" ]; then
+                        DETECTED_UID=$uid
+                    fi
+                done
+                
+                # Collect all non-root GIDs
+                for gid in $FOUND_GIDS; do
+                    if [ "$gid" != "0" ]; then
+                        if [ -z "$DETECTED_GID" ]; then
+                            DETECTED_GID=$gid
+                        elif [ "$gid" != "$DETECTED_GID" ]; then
+                            DETECTED_ADDITIONAL_GIDS+=("$gid")
+                        fi
+                    fi
+                done
                 
                 if [ -n "$DETECTED_UID" ] && [ -n "$DETECTED_GID" ]; then
-                    echo -e "${GREEN}Auto-detected from $SAMPLE_FILE${NC}"
-                    echo -e "${GREEN}  UID: $DETECTED_UID${NC}"
-                    echo -e "${GREEN}  GID: $DETECTED_GID${NC}"
+                    echo -e "${GREEN}Primary UID: $DETECTED_UID${NC}"
+                    echo -e "${GREEN}Primary GID: $DETECTED_GID${NC}"
+                    if [ ${#DETECTED_ADDITIONAL_GIDS[@]} -gt 0 ]; then
+                        echo -e "${YELLOW}Additional GIDs found: ${DETECTED_ADDITIONAL_GIDS[*]}${NC}"
+                    fi
                     break
                 fi
             fi
@@ -174,11 +192,25 @@ if [ "$NEEDS_NFS_MAPPING" = true ]; then
     echo ""
     if prompt_yes_no "Use detected UID=$NFS_UID and GID=$NFS_GID?"; then
         echo -e "${GREEN}Using UID=$NFS_UID, GID=$NFS_GID${NC}"
+        
+        # Ask about additional GIDs if found
+        if [ ${#DETECTED_ADDITIONAL_GIDS[@]} -gt 0 ]; then
+            echo ""
+            echo -e "${YELLOW}Additional GIDs detected: ${DETECTED_ADDITIONAL_GIDS[*]}${NC}"
+            if prompt_yes_no "Map these additional GIDs as well?"; then
+                NFS_ADDITIONAL_GIDS=("${DETECTED_ADDITIONAL_GIDS[@]}")
+            else
+                NFS_ADDITIONAL_GIDS=()
+            fi
+        else
+            NFS_ADDITIONAL_GIDS=()
+        fi
     else
         echo ""
         echo -e "${YELLOW}Manual override - enter custom values:${NC}"
         NFS_UID=$(prompt_input "NFS User ID (UID)" "$NFS_UID")
         NFS_GID=$(prompt_input "NFS Group ID (GID)" "$NFS_GID")
+        NFS_ADDITIONAL_GIDS=()
     fi
 fi
 
@@ -226,103 +258,89 @@ if [ "$NEEDS_NFS_MAPPING" = true ]; then
     # Backup original config
     cp "/etc/pve/lxc/${CTID}.conf" "/etc/pve/lxc/${CTID}.conf.bak"
     
-    # Create proper non-overlapping ID mappings
-    # Strategy: Split the container's ID space around the NFS UID/GID
-    
-    if [ "$NFS_UID" -eq 0 ] && [ "$NFS_GID" -eq 0 ]; then
-        # Special case: NFS uses root (UID/GID 0)
-        # Map container 0 to host 0, rest to unprivileged range
-        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: u 0 0 1
-lxc.idmap: g 0 0 1
-lxc.idmap: u 1 100001 65535
-lxc.idmap: g 1 100001 65535
-EOF
-    elif [ "$NFS_UID" -eq "$NFS_GID" ]; then
-        # Common case: NFS UID and GID are the same
-        # Split into three ranges: before, at, and after the NFS ID
-        
-        if [ "$NFS_UID" -gt 0 ]; then
-            # Range 1: container 0 to NFS_UID-1 → host 100000 to 100000+NFS_UID-1
-            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: u 0 100000 $NFS_UID
-lxc.idmap: g 0 100000 $NFS_UID
-EOF
-        fi
-        
-        # Range 2: container NFS_UID → host NFS_UID (direct mapping)
-        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: u $NFS_UID $NFS_UID 1
-lxc.idmap: g $NFS_GID $NFS_GID 1
-EOF
-        
-        # Range 3: container NFS_UID+1 to 65535 → host 100000+NFS_UID to end
-        RANGE3_START=$((NFS_UID + 1))
-        RANGE3_HOST_START=$((100000 + NFS_UID))
-        RANGE3_SIZE=$((65536 - NFS_UID - 1))
-        
-        if [ "$RANGE3_SIZE" -gt 0 ]; then
-            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: u $RANGE3_START $RANGE3_HOST_START $RANGE3_SIZE
-lxc.idmap: g $RANGE3_START $RANGE3_HOST_START $RANGE3_SIZE
-EOF
-        fi
-    else
-        # Different NFS_UID and NFS_GID - handle separately
-        # This is more complex but handles edge cases
-        
-        # UID mapping
-        if [ "$NFS_UID" -gt 0 ]; then
-            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: u 0 100000 $NFS_UID
-EOF
-        fi
-        
-        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: u $NFS_UID $NFS_UID 1
-EOF
-        
-        RANGE3_START=$((NFS_UID + 1))
-        RANGE3_HOST_START=$((100000 + NFS_UID))
-        RANGE3_SIZE=$((65536 - NFS_UID - 1))
-        
-        if [ "$RANGE3_SIZE" -gt 0 ]; then
-            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: u $RANGE3_START $RANGE3_HOST_START $RANGE3_SIZE
-EOF
-        fi
-        
-        # GID mapping
-        if [ "$NFS_GID" -gt 0 ]; then
-            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: g 0 100000 $NFS_GID
-EOF
-        fi
-        
-        cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: g $NFS_GID $NFS_GID 1
-EOF
-        
-        RANGE3_START=$((NFS_GID + 1))
-        RANGE3_HOST_START=$((100000 + NFS_GID))
-        RANGE3_SIZE=$((65536 - NFS_GID - 1))
-        
-        if [ "$RANGE3_SIZE" -gt 0 ]; then
-            cat >> "/etc/pve/lxc/${CTID}.conf" << EOF
-lxc.idmap: g $RANGE3_START $RANGE3_HOST_START $RANGE3_SIZE
-EOF
-        fi
+    # Collect all IDs that need direct mapping
+    ALL_MAPPED_GIDS=("$NFS_GID")
+    if [ ${#NFS_ADDITIONAL_GIDS[@]} -gt 0 ]; then
+        ALL_MAPPED_GIDS+=("${NFS_ADDITIONAL_GIDS[@]}")
     fi
+    
+    # Sort and deduplicate the GID list
+    IFS=$'\n' ALL_MAPPED_GIDS=($(printf '%s\n' "${ALL_MAPPED_GIDS[@]}" | sort -nu)); unset IFS
+    
+    echo -e "${YELLOW}Mapping UID: $NFS_UID${NC}"
+    echo -e "${YELLOW}Mapping GIDs: ${ALL_MAPPED_GIDS[*]}${NC}"
+    
+    # Build UID mapping
+    # Strategy: Create ranges between each directly-mapped ID
+    declare -a UID_RANGES
+    declare -a GID_RANGES
+    
+    # UID mapping is simpler - just map the NFS_UID
+    CURRENT_CONTAINER=0
+    CURRENT_HOST=100000
+    
+    if [ "$NFS_UID" -gt 0 ]; then
+        # Range before NFS_UID
+        UID_RANGES+=("u 0 100000 $NFS_UID")
+        CURRENT_CONTAINER=$NFS_UID
+        CURRENT_HOST=$((100000 + NFS_UID))
+    fi
+    
+    # Direct map NFS_UID
+    UID_RANGES+=("u $NFS_UID $NFS_UID 1")
+    CURRENT_CONTAINER=$((NFS_UID + 1))
+    
+    # Range after NFS_UID to end
+    REMAINING=$((65536 - CURRENT_CONTAINER))
+    if [ "$REMAINING" -gt 0 ]; then
+        UID_RANGES+=("u $CURRENT_CONTAINER $CURRENT_HOST $REMAINING")
+    fi
+    
+    # GID mapping - handle multiple direct mappings
+    CURRENT_CONTAINER=0
+    CURRENT_HOST=100000
+    
+    for mapped_gid in "${ALL_MAPPED_GIDS[@]}"; do
+        # Add range before this GID if needed
+        if [ "$mapped_gid" -gt "$CURRENT_CONTAINER" ]; then
+            RANGE_SIZE=$((mapped_gid - CURRENT_CONTAINER))
+            GID_RANGES+=("g $CURRENT_CONTAINER $CURRENT_HOST $RANGE_SIZE")
+            CURRENT_HOST=$((CURRENT_HOST + RANGE_SIZE))
+        fi
+        
+        # Direct map this GID
+        GID_RANGES+=("g $mapped_gid $mapped_gid 1")
+        CURRENT_CONTAINER=$((mapped_gid + 1))
+        # Don't increment CURRENT_HOST - we skip one ID in the unprivileged range
+    done
+    
+    # Final range after all mapped GIDs
+    REMAINING=$((65536 - CURRENT_CONTAINER))
+    if [ "$REMAINING" -gt 0 ]; then
+        GID_RANGES+=("g $CURRENT_CONTAINER $CURRENT_HOST $REMAINING")
+    fi
+    
+    # Write all mappings to config
+    for mapping in "${UID_RANGES[@]}"; do
+        echo "lxc.idmap: $mapping" >> "/etc/pve/lxc/${CTID}.conf"
+    done
+    
+    for mapping in "${GID_RANGES[@]}"; do
+        echo "lxc.idmap: $mapping" >> "/etc/pve/lxc/${CTID}.conf"
+    done
     
     # Update subuid/subgid on host to allow direct mapping
     if ! grep -q "root:$NFS_UID:1" /etc/subuid 2>/dev/null; then
         echo "root:$NFS_UID:1" >> /etc/subuid
     fi
-    if ! grep -q "root:$NFS_GID:1" /etc/subgid 2>/dev/null; then
-        echo "root:$NFS_GID:1" >> /etc/subgid
-    fi
     
-    echo -e "${GREEN}UID/GID mapping configured: Container UID/GID $NFS_UID <-> Host UID/GID $NFS_UID${NC}"
+    for mapped_gid in "${ALL_MAPPED_GIDS[@]}"; do
+        if ! grep -q "root:$mapped_gid:1" /etc/subgid 2>/dev/null; then
+            echo "root:$mapped_gid:1" >> /etc/subgid
+        fi
+    done
+    
+    echo -e "${GREEN}UID/GID mapping configured${NC}"
     echo -e "${YELLOW}Mapping details written to /etc/pve/lxc/${CTID}.conf${NC}"
 fi
 
