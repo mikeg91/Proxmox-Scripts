@@ -210,7 +210,6 @@ pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
     --rootfs "$STORAGE:$DISK_SIZE" \
     --net0 name=eth0,bridge="$NETWORK_BRIDGE",firewall=1,ip=dhcp \
     --unprivileged 1 \
-    --features nesting=1 \
     --password "$PASSWORD" \
     --start 0
 
