@@ -18,8 +18,6 @@ DEFAULT_DISK_SIZE=8
 DEFAULT_STORAGE="local-lvm"
 DEFAULT_TEMPLATE_STORAGE="local"
 DEFAULT_NETWORK_BRIDGE="vmbr0"
-DEFAULT_NFS_UID=1000
-DEFAULT_NFS_GID=1000
 
 ### Prompt functions
 prompt_input() {
@@ -99,7 +97,6 @@ while IFS= read -r line; do
 done < /etc/fstab
 
 SELECTED_MOUNTS=()
-NEEDS_NFS_MAPPING=false
 
 if [ ${#MOUNT_POINTS[@]} -gt 0 ]; then
     IFS=$'\n' MOUNT_POINTS=($(sort -u <<<"${MOUNT_POINTS[*]}")); unset IFS
@@ -120,97 +117,7 @@ if [ ${#MOUNT_POINTS[@]} -gt 0 ]; then
             CONTAINER_PATH=$(prompt_input "Container mount path" "$DEFAULT_CONTAINER_PATH")
             if prompt_yes_no "Mount as read-only?"; then READONLY=1; else READONLY=0; fi
             SELECTED_MOUNTS+=("$HOST_PATH|$CONTAINER_PATH|$READONLY")
-            
-            # Check if this is an NFS mount
-            if grep -q "^[^ ]* $HOST_PATH nfs" /etc/fstab 2>/dev/null; then
-                NEEDS_NFS_MAPPING=true
-            fi
         done
-    fi
-fi
-
-# Auto-detect NFS UID/GID mapping if NFS mounts detected
-NFS_UID=$DEFAULT_NFS_UID
-NFS_GID=$DEFAULT_NFS_GID
-if [ "$NEEDS_NFS_MAPPING" = true ]; then
-    echo ""
-    echo -e "${YELLOW}NFS mount detected. Detecting UID/GID from mount points...${NC}"
-    
-    # Try to detect UID/GID from the first NFS mount point
-    DETECTED_UID=""
-    DETECTED_GID=""
-    DETECTED_ADDITIONAL_GIDS=()
-    
-    for mount_info in "${SELECTED_MOUNTS[@]}"; do
-        IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "$mount_info"
-        if grep -q "^[^ ]* $HOST_PATH nfs" /etc/fstab 2>/dev/null; then
-            if [ -d "$HOST_PATH" ]; then
-                echo -e "${BLUE}Scanning $HOST_PATH for ownership...${NC}"
-                
-                # Collect unique UIDs and GIDs from files in the NFS share
-                FOUND_UIDS=$(find "$HOST_PATH" -maxdepth 3 2>/dev/null | head -n 20 | xargs -r stat -c '%u' 2>/dev/null | sort -u)
-                FOUND_GIDS=$(find "$HOST_PATH" -maxdepth 3 2>/dev/null | head -n 20 | xargs -r stat -c '%g' 2>/dev/null | sort -u)
-                
-                # Use the most common non-root UID (or first found)
-                for uid in $FOUND_UIDS; do
-                    if [ "$uid" != "0" ] && [ -z "$DETECTED_UID" ]; then
-                        DETECTED_UID=$uid
-                    fi
-                done
-                
-                # Collect all non-root GIDs
-                for gid in $FOUND_GIDS; do
-                    if [ "$gid" != "0" ]; then
-                        if [ -z "$DETECTED_GID" ]; then
-                            DETECTED_GID=$gid
-                        elif [ "$gid" != "$DETECTED_GID" ]; then
-                            DETECTED_ADDITIONAL_GIDS+=("$gid")
-                        fi
-                    fi
-                done
-                
-                if [ -n "$DETECTED_UID" ] && [ -n "$DETECTED_GID" ]; then
-                    echo -e "${GREEN}Primary UID: $DETECTED_UID${NC}"
-                    echo -e "${GREEN}Primary GID: $DETECTED_GID${NC}"
-                    if [ ${#DETECTED_ADDITIONAL_GIDS[@]} -gt 0 ]; then
-                        echo -e "${YELLOW}Additional GIDs found: ${DETECTED_ADDITIONAL_GIDS[*]}${NC}"
-                    fi
-                    break
-                fi
-            fi
-        fi
-    done
-    
-    # Use detected values as defaults
-    if [ -n "$DETECTED_UID" ]; then
-        NFS_UID=$DETECTED_UID
-    fi
-    if [ -n "$DETECTED_GID" ]; then
-        NFS_GID=$DETECTED_GID
-    fi
-    
-    echo ""
-    if prompt_yes_no "Use detected UID=$NFS_UID and GID=$NFS_GID?"; then
-        echo -e "${GREEN}Using UID=$NFS_UID, GID=$NFS_GID${NC}"
-        
-        # Ask about additional GIDs if found
-        if [ ${#DETECTED_ADDITIONAL_GIDS[@]} -gt 0 ]; then
-            echo ""
-            echo -e "${YELLOW}Additional GIDs detected: ${DETECTED_ADDITIONAL_GIDS[*]}${NC}"
-            if prompt_yes_no "Map these additional GIDs as well?"; then
-                NFS_ADDITIONAL_GIDS=("${DETECTED_ADDITIONAL_GIDS[@]}")
-            else
-                NFS_ADDITIONAL_GIDS=()
-            fi
-        else
-            NFS_ADDITIONAL_GIDS=()
-        fi
-    else
-        echo ""
-        echo -e "${YELLOW}Manual override - enter custom values:${NC}"
-        NFS_UID=$(prompt_input "NFS User ID (UID)" "$NFS_UID")
-        NFS_GID=$(prompt_input "NFS Group ID (GID)" "$NFS_GID")
-        NFS_ADDITIONAL_GIDS=()
     fi
 fi
 
@@ -247,103 +154,6 @@ EOF
     fi
 fi
 
-### STEP 1.5: Configure UID/GID mapping for NFS compatibility
-if [ "$NEEDS_NFS_MAPPING" = true ]; then
-    echo -e "${GREEN}Configuring UID/GID mapping for NFS...${NC}"
-    
-    # Stop container if running
-    pct stop "$CTID" 2>/dev/null || true
-    sleep 2
-    
-    # Backup original config
-    cp "/etc/pve/lxc/${CTID}.conf" "/etc/pve/lxc/${CTID}.conf.bak"
-    
-    # Collect all IDs that need direct mapping
-    ALL_MAPPED_GIDS=("$NFS_GID")
-    if [ ${#NFS_ADDITIONAL_GIDS[@]} -gt 0 ]; then
-        ALL_MAPPED_GIDS+=("${NFS_ADDITIONAL_GIDS[@]}")
-    fi
-    
-    # Sort and deduplicate the GID list
-    IFS=$'\n' ALL_MAPPED_GIDS=($(printf '%s\n' "${ALL_MAPPED_GIDS[@]}" | sort -nu)); unset IFS
-    
-    echo -e "${YELLOW}Mapping UID: $NFS_UID${NC}"
-    echo -e "${YELLOW}Mapping GIDs: ${ALL_MAPPED_GIDS[*]}${NC}"
-    
-    # Build UID mapping
-    # Strategy: Create ranges between each directly-mapped ID
-    declare -a UID_RANGES
-    declare -a GID_RANGES
-    
-    # UID mapping is simpler - just map the NFS_UID
-    CURRENT_CONTAINER=0
-    CURRENT_HOST=100000
-    
-    if [ "$NFS_UID" -gt 0 ]; then
-        # Range before NFS_UID
-        UID_RANGES+=("u 0 100000 $NFS_UID")
-        CURRENT_CONTAINER=$NFS_UID
-        CURRENT_HOST=$((100000 + NFS_UID))
-    fi
-    
-    # Direct map NFS_UID
-    UID_RANGES+=("u $NFS_UID $NFS_UID 1")
-    CURRENT_CONTAINER=$((NFS_UID + 1))
-    
-    # Range after NFS_UID to end
-    REMAINING=$((65536 - CURRENT_CONTAINER))
-    if [ "$REMAINING" -gt 0 ]; then
-        UID_RANGES+=("u $CURRENT_CONTAINER $CURRENT_HOST $REMAINING")
-    fi
-    
-    # GID mapping - handle multiple direct mappings
-    CURRENT_CONTAINER=0
-    CURRENT_HOST=100000
-    
-    for mapped_gid in "${ALL_MAPPED_GIDS[@]}"; do
-        # Add range before this GID if needed
-        if [ "$mapped_gid" -gt "$CURRENT_CONTAINER" ]; then
-            RANGE_SIZE=$((mapped_gid - CURRENT_CONTAINER))
-            GID_RANGES+=("g $CURRENT_CONTAINER $CURRENT_HOST $RANGE_SIZE")
-            CURRENT_HOST=$((CURRENT_HOST + RANGE_SIZE))
-        fi
-        
-        # Direct map this GID
-        GID_RANGES+=("g $mapped_gid $mapped_gid 1")
-        CURRENT_CONTAINER=$((mapped_gid + 1))
-        # Don't increment CURRENT_HOST - we skip one ID in the unprivileged range
-    done
-    
-    # Final range after all mapped GIDs
-    REMAINING=$((65536 - CURRENT_CONTAINER))
-    if [ "$REMAINING" -gt 0 ]; then
-        GID_RANGES+=("g $CURRENT_CONTAINER $CURRENT_HOST $REMAINING")
-    fi
-    
-    # Write all mappings to config
-    for mapping in "${UID_RANGES[@]}"; do
-        echo "lxc.idmap: $mapping" >> "/etc/pve/lxc/${CTID}.conf"
-    done
-    
-    for mapping in "${GID_RANGES[@]}"; do
-        echo "lxc.idmap: $mapping" >> "/etc/pve/lxc/${CTID}.conf"
-    done
-    
-    # Update subuid/subgid on host to allow direct mapping
-    if ! grep -q "root:$NFS_UID:1" /etc/subuid 2>/dev/null; then
-        echo "root:$NFS_UID:1" >> /etc/subuid
-    fi
-    
-    for mapped_gid in "${ALL_MAPPED_GIDS[@]}"; do
-        if ! grep -q "root:$mapped_gid:1" /etc/subgid 2>/dev/null; then
-            echo "root:$mapped_gid:1" >> /etc/subgid
-        fi
-    done
-    
-    echo -e "${GREEN}UID/GID mapping configured${NC}"
-    echo -e "${YELLOW}Mapping details written to /etc/pve/lxc/${CTID}.conf${NC}"
-fi
-
 ### STEP 2: Boot to create directories
 echo -e "${GREEN}Starting container for initial setup...${NC}"
 pct start "$CTID"
@@ -361,24 +171,19 @@ if [ ${#SELECTED_MOUNTS[@]} -gt 0 ]; then
     pct stop "$CTID"
     sleep 5
 
-    ### STEP 4: Modify Config with mounts
+    ### STEP 4: Add mounts with shift=1 for automatic UID/GID mapping
+    echo -e "${GREEN}Configuring bind mounts with automatic UID/GID shifting...${NC}"
     for i in "${!SELECTED_MOUNTS[@]}"; do
         IFS='|' read -r HOST_PATH CONTAINER_PATH READONLY <<< "${SELECTED_MOUNTS[$i]}"
-        # For NFS with UID mapping, we don't need idmap=0
-        if [ "$NEEDS_NFS_MAPPING" = true ]; then
-            if [ "$READONLY" -eq 1 ]; then
-                pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,ro=1"
-            else
-                pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH"
-            fi
+        
+        # Use shift=1 to automatically remap UIDs/GIDs
+        # This shifts container UIDs by +100000, making them work with NFS
+        if [ "$READONLY" -eq 1 ]; then
+            pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,ro=1,shift=1"
         else
-            # For non-NFS mounts, use idmap=0
-            if [ "$READONLY" -eq 1 ]; then
-                pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,ro=1,idmap=0"
-            else
-                pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,idmap=0"
-            fi
+            pct set "$CTID" -mp$i "$HOST_PATH,mp=$CONTAINER_PATH,shift=1"
         fi
+        echo -e "${GREEN}  Mounted: $HOST_PATH -> $CONTAINER_PATH (shift=1)${NC}"
     done
 
     ### STEP 5: Final Start
@@ -418,9 +223,7 @@ fi
 
 echo -e "${GREEN}=== Complete ===${NC}"
 echo ""
-if [ "$NEEDS_NFS_MAPPING" = true ]; then
-    echo -e "${YELLOW}Note: UID/GID mapping applied for NFS compatibility${NC}"
-    echo -e "${YELLOW}Container UID/GID $NFS_UID maps directly to host UID/GID $NFS_UID${NC}"
-    echo ""
-fi
 echo -e "${GREEN}Container $CTID ($HOSTNAME) is ready!${NC}"
+if [ ${#SELECTED_MOUNTS[@]} -gt 0 ]; then
+    echo -e "${YELLOW}Note: Bind mounts configured with shift=1 for automatic UID/GID mapping${NC}"
+fi
