@@ -68,8 +68,10 @@ echo "==> Enabling and starting service..."
 systemctl daemon-reload
 systemctl enable --now tautulli.service
 
-echo
-echo "Tautulli installation complete!"
-echo
-echo "Access it at:"
-echo "http://<container-ip>:8181"
+
+IP=$(ip -4 addr show scope global | awk '/inet/ {print $2}' | cut -d/ -f1 | head -n1)
+
+echo ""
+echo "Tautulli installed and running"
+echo "Access it at: http://$IP:8181"
+echo ""
