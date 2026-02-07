@@ -1,40 +1,77 @@
 #!/bin/bash
 set -e
 
-echo "== Installing Radarr =="
+echo "== Radarr Hands-On Install (Servarr Wiki) =="
 
-# Basic deps
+# 1) Update + prerequisites
 apt update
-apt install -y \
-  curl \
-  sqlite3 \
-  ca-certificates \
-  gnupg
+apt install -y curl sqlite3
 
-# Create radarr user/group if missing
-if ! id radarr &>/dev/null; then
-  useradd -r -m -d /var/lib/radarr -s /usr/sbin/nologin radarr
+# 2) Create radarr user + media group
+if ! grep -q "^media:" /etc/group; then
+  groupadd media
 fi
 
-# Add Radarr repo + key
-install -m 0755 -d /etc/apt/keyrings
+if ! id radarr &>/dev/null; then
+  useradd -r -m -s /usr/sbin/nologin -G media radarr
+else
+  # ensure radarr is in media group
+  usermod -aG media radarr
+fi
 
-curl -fsSL https://radarr.servarr.com/v1/repo/setup.sh | bash
+# 3) Prepare directories
+mkdir -p /var/lib/radarr
+chown radarr:media /var/lib/radarr
 
-# Install Radarr
-apt update
-apt install -y radarr
+# 4) Determine architecture string
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+  amd64) RADARCH="x64" ;;
+  arm64) RADARCH="arm64" ;;
+  armhf|armel) RADARCH="arm" ;;
+  *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+esac
 
-# Ensure permissions
-chown -R radarr:radarr \
-  /var/lib/radarr \
-  /etc/radarr \
-  /var/log/radarr
+# 5) Download Radarr binary release
+echo "Downloading Radarr .tar.gz for arch: $RADARCH"
+wget --content-disposition \
+  "https://radarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${RADARCH}"
 
-# Enable + start
-systemctl enable radarr
-systemctl start radarr
+# 6) Extract install
+tar -xvzf Radarr*.linux*.tar.gz
+mv Radarr /opt/
+
+# 7) Ownership
+chown -R radarr:media /opt/Radarr
+
+# 8) Create systemd service
+cat > /etc/systemd/system/radarr.service << 'EOF'
+[Unit]
+Description=Radarr Daemon
+After=syslog.target network.target
+
+[Service]
+User=radarr
+Group=media
+Type=simple
+ExecStart=/opt/Radarr/Radarr -nobrowser -data=/var/lib/radarr/
+TimeoutStopSec=20
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 9) Enable + start
+systemctl daemon-reload
+systemctl enable --now radarr
+
+# 10) Cleanup tarball
+rm Radarr*.linux*.tar.gz
+
+IP=$(ip -4 addr show scope global | awk '/inet/ {print $2}' | cut -d/ -f1 | head -n1)
 
 echo ""
-echo "Radarr installed successfully"
-echo "Web UI: http://<container-ip>:7878"
+echo "== Radarr Installed =="
+echo "Web UI: http://${IP}:7878"
