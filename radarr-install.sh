@@ -70,5 +70,9 @@ systemctl enable --now radarr
 # 10) Cleanup tarball
 rm Radarr*.linux*.tar.gz
 
-echo "Radarr installed successfully"
-echo "Web UI: http://<container-ip>:7878"
+IP=$(ip -4 addr show scope global | awk '/inet/ {print $2}' | cut -d/ -f1 | head -n1)
+
+echo ""
+echo "Radarr installed and running"
+echo "Access it at: http://$IP:7878"
+echo ""
