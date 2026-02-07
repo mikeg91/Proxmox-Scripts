@@ -72,4 +72,4 @@ echo
 echo "✅ Tautulli installation complete!"
 echo
 echo "Access it at:"
-ip -4 addr show scope global | awk '/inet/ {print "  http://" $2 ":8181"}'
+echo "http://<container-ip>:8181"
