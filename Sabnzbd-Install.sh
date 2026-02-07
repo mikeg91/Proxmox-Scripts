@@ -91,7 +91,8 @@ systemctl start sabnzbd
 # ----------------------------
 # Done
 # ----------------------------
-IP=$(hostname -I | awk '{print $1}')
+
+IP=$(ip -4 addr show scope global | awk '/inet/ {print $2}' | cut -d/ -f1 | head -n1)
 
 echo ""
 echo "SABnzbd installed and running"
