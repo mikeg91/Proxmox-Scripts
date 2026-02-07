@@ -69,7 +69,7 @@ systemctl daemon-reload
 systemctl enable --now tautulli.service
 
 echo
-echo "✅ Tautulli installation complete!"
+echo "Tautulli installation complete!"
 echo
 echo "Access it at:"
 echo "http://<container-ip>:8181"
