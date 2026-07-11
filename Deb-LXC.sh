@@ -4,7 +4,7 @@
 # Target: Proxmox VE 9.1.5, unprivileged Debian 12 (bookworm)
 #
 # - Creates an unprivileged Debian 12 LXC with sensible defaults
-# - Installs a practical base toolset (curl, wget, gnupg, ca-certificates)
+# - Installs a practical base toolset (curl, wget, gnupg, gnupg2, ca-certificates)
 # - Prompts for timezone (defaults to America/New_York, all IANA zones available)
 # - Optionally enables unattended-upgrades for Debian SECURITY updates only
 # - Optionally binds in host mount points
@@ -381,7 +381,7 @@ echo -e "${GREEN}Configuring apt sources...${NC}"
 pct push "$CTID" "$STAGE/sources.list" /etc/apt/sources.list
 
 ### Package list
-BASE_PACKAGES="curl wget gnupg ca-certificates"
+BASE_PACKAGES="curl wget gnupg gnupg2 ca-certificates"
 [ "$ENABLE_UU" = true ] && BASE_PACKAGES="$BASE_PACKAGES unattended-upgrades"
 if [ "$INSTALL_GPU_DRIVERS" = true ]; then
     BASE_PACKAGES="$BASE_PACKAGES intel-media-va-driver-non-free vainfo"
