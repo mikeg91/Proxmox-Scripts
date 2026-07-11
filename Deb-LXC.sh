@@ -239,7 +239,7 @@ EOF
 "
 
 ### Base packages (+ VA-API drivers if requested during GPU setup)
-BASE_PACKAGES="curl wget gnupg ca-certificates attended-upgrades apt-listchanges"
+BASE_PACKAGES="curl wget gnupg ca-certificates unattended-upgrades apt-listchanges"
 if [ "$INSTALL_GPU_DRIVERS" = true ]; then
     BASE_PACKAGES="$BASE_PACKAGES intel-media-va-driver-non-free vainfo"
     echo -e "${GREEN}Intel VA-API drivers will be installed with the base system${NC}"
