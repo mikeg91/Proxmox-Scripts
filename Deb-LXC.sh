@@ -32,6 +32,7 @@ DEFAULT_STORAGE="local-lvm"
 DEFAULT_TEMPLATE_STORAGE="local"
 DEFAULT_NETWORK_BRIDGE="vmbr0"
 DEFAULT_TIMEZONE="America/New_York"
+DEFAULT_LOCALE="en_US.UTF-8"
 DEFAULT_REBOOT_TIME="02:00"
 
 ### Colors
@@ -348,6 +349,19 @@ if ! pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1; then
 fi
 echo -e "${GREEN}DNS OK${NC}"
 
+### Locale FIRST - the fresh template has no locale generated, and pct exec
+### inherits the host's LANG. Generating it here means every downstream step
+### (timezone, apt, unattended-upgrades) runs without locale warnings.
+echo -e "${GREEN}Generating locale $DEFAULT_LOCALE...${NC}"
+pct exec "$CTID" -- bash -c "
+  set -e
+  # C.UTF-8 always exists and needs no generation - use it for this step itself
+  export LANG=C.UTF-8 LC_ALL=C.UTF-8
+  sed -i 's/^# *${DEFAULT_LOCALE} UTF-8/${DEFAULT_LOCALE} UTF-8/' /etc/locale.gen
+  locale-gen
+  update-locale LANG=${DEFAULT_LOCALE}
+"
+
 ### Timezone
 echo -e "${GREEN}Setting timezone to $TIMEZONE...${NC}"
 pct exec "$CTID" -- bash -c "ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime && echo '$TIMEZONE' > /etc/timezone"
@@ -429,6 +443,21 @@ EOF
 fi
 
 rm -rf "$STAGE"
+
+### Restart the container so upgraded services are actually RUNNING.
+### dpkg cannot restart services via 'pct exec' (no usable systemd connection),
+### so after the security upgrade the container is still running the OLD
+### systemd/sshd/libssl binaries in memory until it is restarted.
+echo ""
+echo -e "${YELLOW}=====================================================${NC}"
+echo -e "${YELLOW}  Restarting container $CTID to fully apply security${NC}"
+echo -e "${YELLOW}  patches. Upgraded services (systemd, ssh, openssl)${NC}"
+echo -e "${YELLOW}  keep running their old binaries until a restart.${NC}"
+echo -e "${YELLOW}  Please wait - do not interrupt.${NC}"
+echo -e "${YELLOW}=====================================================${NC}"
+pct reboot "$CTID"
+wait_for_container "$CTID"
+echo -e "${GREEN}Container restarted - security patches are now in effect${NC}"
 
 ### Confirm GPU node presence (and VA-API if drivers were installed)
 if [ "$CONFIGURE_GPU" = true ]; then
