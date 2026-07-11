@@ -104,7 +104,7 @@ if detect_intel_gpu; then
     echo "  Render node: ${INTEL_RENDER:-<none>}"
     echo "  Card node:   ${INTEL_CARD:-<none>}"
     echo ""
-    echo "Passthrough must be wired now - it can't be added from inside the container later."
+    echo "Passthrough must be configured when the container is created."
     if prompt_yes_no "Configure host-level Intel iGPU passthrough for this container?"; then
         CONFIGURE_GPU=true
         echo ""
@@ -232,17 +232,14 @@ fi
 echo -e "${GREEN}Configuring apt sources...${NC}"
 pct exec "$CTID" -- bash -c "cat > /etc/apt/sources.list << 'EOF'
 deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-deb-src http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
-deb-src http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware
 EOF
 "
 
 ### Base packages (+ VA-API drivers if requested during GPU setup)
-BASE_PACKAGES="curl wget gnupg ca-certificates apt-transport-https unattended-upgrades apt-listchanges htop nano sudo"
+BASE_PACKAGES="curl wget gnupg ca-certificates attended-upgrades apt-listchanges"
 if [ "$INSTALL_GPU_DRIVERS" = true ]; then
     BASE_PACKAGES="$BASE_PACKAGES intel-media-va-driver-non-free vainfo"
     echo -e "${GREEN}Intel VA-API drivers will be installed with the base system${NC}"
