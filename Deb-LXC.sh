@@ -4,12 +4,19 @@
 # Target: Proxmox VE 9.1.5, unprivileged Debian 12 (bookworm)
 #
 # - Creates an unprivileged Debian 12 LXC with sensible defaults
-# - Installs a practical base toolset (curl, wget, gnupg, htop, etc.)
-# - Enables unattended-upgrades for Debian SECURITY updates only
+# - Installs a practical base toolset (curl, wget, gnupg, ca-certificates)
+# - Prompts for timezone (defaults to America/New_York, all IANA zones available)
+# - Optionally enables unattended-upgrades for Debian SECURITY updates only
 # - Optionally binds in host mount points
-# - Optionally wires Intel iGPU passthrough at the HOST level (the only
-#   step that can't be added from inside the container later). Drivers are
-#   left for you to install inside the container if/when you need them.
+# - Optionally wires Intel iGPU passthrough at the HOST level and installs
+#   the VA-API drivers
+#
+# TODO: consider prompting whether to enable bookworm-backports.
+#   Backports carries newer versions of things like: linux-cpupower, zfsutils,
+#   restic, borgbackup, and newer firmware/hardware-support packages.
+#   Nothing is ever pulled from backports automatically - it only applies when
+#   explicitly requested:  apt install -t bookworm-backports <pkg>
+#   Currently backports is enabled in sources.list but nothing installs from it.
 #####
 
 set -e
@@ -24,6 +31,8 @@ DEFAULT_DISK_SIZE=8
 DEFAULT_STORAGE="local-lvm"
 DEFAULT_TEMPLATE_STORAGE="local"
 DEFAULT_NETWORK_BRIDGE="vmbr0"
+DEFAULT_TIMEZONE="America/New_York"
+DEFAULT_REBOOT_TIME="02:00"
 
 ### Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -54,6 +63,76 @@ wait_for_container() {
         sleep 1; i=$((i + 1))
     done
     echo -e "${RED}Timed out waiting for container $ctid${NC}"; return 1
+}
+
+# Full IANA zone list (timedatectl on PVE; zoneinfo fallback)
+list_all_zones() {
+    if command -v timedatectl >/dev/null 2>&1 && timedatectl list-timezones >/dev/null 2>&1; then
+        timedatectl list-timezones
+    else
+        find /usr/share/zoneinfo -type f -printf '%P\n' 2>/dev/null \
+            | grep -E '^[A-Z][A-Za-z_]+/' | sort
+    fi
+}
+
+# Timezone picker: common zones + search fallback across all zones.
+# NOTE: all menu output goes to stderr so the chosen zone is the only stdout.
+prompt_timezone() {
+    local zones=(
+        America/New_York America/Chicago America/Denver America/Los_Angeles
+        America/Anchorage Pacific/Honolulu America/Toronto America/Sao_Paulo
+        Europe/London Europe/Berlin Europe/Paris Europe/Moscow
+        Asia/Dubai Asia/Kolkata Asia/Shanghai Asia/Tokyo
+        Australia/Sydney UTC
+    )
+    local n=${#zones[@]}
+    local other=$((n + 1))
+    local sel search matches i
+
+    while true; do
+        echo "" >&2
+        echo "Timezone:" >&2
+        for ((i = 0; i < n; i += 2)); do
+            if [ $((i + 1)) -lt $n ]; then
+                printf "  %2d) %-22s  %2d) %s\n" "$((i+1))" "${zones[$i]}" "$((i+2))" "${zones[$((i+1))]}" >&2
+            else
+                printf "  %2d) %s\n" "$((i+1))" "${zones[$i]}" >&2
+            fi
+        done
+        printf "  %2d) Other (search all zones)\n" "$other" >&2
+
+        read -r -p "Select [1 = $DEFAULT_TIMEZONE]: " sel
+        sel="${sel:-1}"
+
+        if ! [[ "$sel" =~ ^[0-9]+$ ]]; then
+            echo "Please enter a number." >&2; continue
+        fi
+
+        if [ "$sel" -ge 1 ] && [ "$sel" -le "$n" ]; then
+            echo "${zones[$((sel - 1))]}"; return 0
+        fi
+
+        if [ "$sel" -eq "$other" ]; then
+            read -r -p "Search (e.g. paris, denver, auckland): " search
+            [[ -z "$search" ]] && continue
+            mapfile -t matches < <(list_all_zones | grep -i -- "$search" || true)
+            if [ ${#matches[@]} -eq 0 ]; then
+                echo "No zones matched '$search'." >&2; continue
+            fi
+            echo "" >&2
+            for i in "${!matches[@]}"; do
+                printf "  %2d) %s\n" "$((i+1))" "${matches[$i]}" >&2
+            done
+            read -r -p "Select (or Enter to go back): " sel
+            [[ -z "$sel" ]] && continue
+            if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#matches[@]} ]; then
+                echo "${matches[$((sel - 1))]}"; return 0
+            fi
+            echo "Invalid selection." >&2; continue
+        fi
+
+        echo "Invalid selection." >&2
+    done
 }
 
 # Detect an Intel GPU on the host; sets INTEL_RENDER / INTEL_CARD
@@ -91,6 +170,33 @@ NETWORK_BRIDGE=$(prompt_input "Network Bridge" "$DEFAULT_NETWORK_BRIDGE")
 
 if pct status "$CTID" &>/dev/null; then
     echo -e "${RED}Error: Container $CTID already exists${NC}"; exit 1
+fi
+
+### Timezone
+TIMEZONE=$(prompt_timezone)
+echo -e "${GREEN}Timezone: $TIMEZONE${NC}"
+
+### Unattended-upgrades
+echo ""
+echo -e "${BLUE}=== Unattended Upgrades ===${NC}"
+ENABLE_UU=false; UU_REBOOT=false; UU_REBOOT_TIME="$DEFAULT_REBOOT_TIME"
+UU_AUTOREMOVE=true; UU_MAIL=""
+
+if prompt_yes_no "Enable unattended upgrades (Debian security updates only)?"; then
+    ENABLE_UU=true
+    echo -e "${YELLOW}Note: auto-reboot will restart THIS CONTAINER when an update requires it.${NC}"
+    if prompt_yes_no "Automatically reboot the container when an update requires it?"; then
+        UU_REBOOT=true
+        UU_REBOOT_TIME=$(prompt_input "Reboot time (HH:MM)" "$DEFAULT_REBOOT_TIME")
+    fi
+    if prompt_yes_no "Automatically remove unused dependencies?"; then
+        UU_AUTOREMOVE=true
+    else
+        UU_AUTOREMOVE=false
+    fi
+    UU_MAIL=$(prompt_input "Email address for reports (blank = none)" "")
+else
+    echo -e "${YELLOW}Unattended upgrades will not be installed${NC}"
 fi
 
 trap 'echo -e "${RED}Script failed. Container $CTID may be incomplete. Inspect: pct config $CTID | Remove: pct destroy $CTID${NC}"' ERR
@@ -190,7 +296,7 @@ pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
     --net0 name=eth0,bridge="$NETWORK_BRIDGE",firewall=1,ip=dhcp \
     --unprivileged 1 --password "$PASSWORD" --start 0
 
-### Host-level iGPU passthrough (device wiring only - no drivers here)
+### Host-level iGPU passthrough (device wiring only)
 if [ "$CONFIGURE_GPU" = true ]; then
     echo -e "${GREEN}Wiring Intel iGPU passthrough into container config...${NC}"
     CONFIG_FILE="/etc/pve/lxc/${CTID}.conf"
@@ -228,23 +334,47 @@ if [ ${#SELECTED_MOUNTS[@]} -gt 0 ]; then
     pct start "$CTID"; wait_for_container "$CTID"
 fi
 
-### apt sources (contrib + non-free so you can add the Intel driver later)
-echo -e "${GREEN}Configuring apt sources...${NC}"
-pct exec "$CTID" -- bash -c "cat > /etc/apt/sources.list << 'EOF'
+### Wait for DNS before touching apt (DHCP may not have settled yet)
+echo -e "${GREEN}Waiting for network/DNS...${NC}"
+for _ in $(seq 1 15); do
+    pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1 && break
+    sleep 2
+done
+if ! pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1; then
+    echo -e "${RED}Container cannot resolve DNS - aborting before package install.${NC}"
+    echo -e "${YELLOW}Container /etc/resolv.conf:${NC}"
+    pct exec "$CTID" -- cat /etc/resolv.conf || true
+    exit 1
+fi
+echo -e "${GREEN}DNS OK${NC}"
+
+### Timezone
+echo -e "${GREEN}Setting timezone to $TIMEZONE...${NC}"
+pct exec "$CTID" -- bash -c "ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime && echo '$TIMEZONE' > /etc/timezone"
+
+### Stage config files on the host, then push them in (no escaping needed)
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"; echo -e "${RED}Script failed. Container $CTID may be incomplete. Inspect: pct config $CTID | Remove: pct destroy $CTID${NC}"' ERR
+
+cat > "$STAGE/sources.list" << 'EOF'
 deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware
 EOF
-"
 
-### Base packages (+ VA-API drivers if requested during GPU setup)
-BASE_PACKAGES="curl wget gnupg ca-certificates unattended-upgrades apt-listchanges"
+echo -e "${GREEN}Configuring apt sources...${NC}"
+pct push "$CTID" "$STAGE/sources.list" /etc/apt/sources.list
+
+### Package list
+BASE_PACKAGES="curl wget gnupg ca-certificates"
+[ "$ENABLE_UU" = true ] && BASE_PACKAGES="$BASE_PACKAGES unattended-upgrades"
 if [ "$INSTALL_GPU_DRIVERS" = true ]; then
     BASE_PACKAGES="$BASE_PACKAGES intel-media-va-driver-non-free vainfo"
     echo -e "${GREEN}Intel VA-API drivers will be installed with the base system${NC}"
 fi
 
+### Single apt pass: sources are in place, so update -> upgrade -> install
 echo -e "${GREEN}Updating system and installing base packages...${NC}"
 pct exec "$CTID" -- bash -c "
   set -e
@@ -254,36 +384,51 @@ pct exec "$CTID" -- bash -c "
   apt install -y $BASE_PACKAGES
 "
 
-### Unattended-upgrades (Debian security only)
-echo -e "${GREEN}Configuring unattended-upgrades...${NC}"
-pct exec "$CTID" -- bash -c "
-  cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOFUUPGRADE'
+### Unattended-upgrades config (only if enabled)
+if [ "$ENABLE_UU" = true ]; then
+    echo -e "${GREEN}Configuring unattended-upgrades...${NC}"
+
+    cat > "$STAGE/50unattended-upgrades" << EOF
+// Debian security updates only - third-party repos are NOT auto-updated.
 Unattended-Upgrade::Origins-Pattern {
-    \"origin=Debian,codename=\${distro_codename}-security,label=Debian-Security\";
+    "origin=Debian,codename=\${distro_codename}-security,label=Debian-Security";
 };
 
 Unattended-Upgrade::Package-Blacklist {
 };
 
-Unattended-Upgrade::Remove-Unused-Kernel-Packages \"true\";
-Unattended-Upgrade::Remove-New-Unused-Dependencies \"true\";
-Unattended-Upgrade::Remove-Unused-Dependencies \"true\";
+// Kernel packages don't exist in an LXC (the host kernel is shared),
+// so this setting does nothing here. Left commented for reference.
+//Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 
-Unattended-Upgrade::Automatic-Reboot \"true\";
-Unattended-Upgrade::Automatic-Reboot-Time \"02:00\";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "$([ "$UU_AUTOREMOVE" = true ] && echo true || echo false)";
+Unattended-Upgrade::Remove-Unused-Dependencies "$([ "$UU_AUTOREMOVE" = true ] && echo true || echo false)";
 
-//Unattended-Upgrade::Mail \"root\";
-Unattended-Upgrade::MailReport \"on-change\";
-EOFUUPGRADE
+Unattended-Upgrade::Automatic-Reboot "$([ "$UU_REBOOT" = true ] && echo true || echo false)";
+Unattended-Upgrade::Automatic-Reboot-Time "$UU_REBOOT_TIME";
+EOF
 
-  cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOFAUTO'
-APT::Periodic::Update-Package-Lists \"1\";
-APT::Periodic::Unattended-Upgrade \"1\";
-APT::Periodic::Download-Upgradeable-Packages \"1\";
-APT::Periodic::AutocleanInterval \"7\";
-EOFAUTO
-"
-echo -e "${GREEN}Unattended-upgrades configured${NC}"
+    if [ -n "$UU_MAIL" ]; then
+        cat >> "$STAGE/50unattended-upgrades" << EOF
+
+Unattended-Upgrade::Mail "$UU_MAIL";
+Unattended-Upgrade::MailReport "on-change";
+EOF
+    fi
+
+    cat > "$STAGE/20auto-upgrades" << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+
+    pct push "$CTID" "$STAGE/50unattended-upgrades" /etc/apt/apt.conf.d/50unattended-upgrades
+    pct push "$CTID" "$STAGE/20auto-upgrades"       /etc/apt/apt.conf.d/20auto-upgrades
+    echo -e "${GREEN}Unattended-upgrades configured${NC}"
+fi
+
+rm -rf "$STAGE"
 
 ### Confirm GPU node presence (and VA-API if drivers were installed)
 if [ "$CONFIGURE_GPU" = true ]; then
@@ -310,17 +455,25 @@ echo -e "${GREEN}=== Configuration Complete ===${NC}"
 echo "Container ID:        $CTID"
 echo "Hostname:            $CT_HOSTNAME"
 [[ -n "$CT_IP" ]] && echo "IP Address:          $CT_IP"
+echo "Timezone:            $TIMEZONE"
 echo "Unprivileged:        Yes"
-echo "Unattended-Upgrades: Enabled (Debian security only)"
+if [ "$ENABLE_UU" = true ]; then
+    echo "Unattended-Upgrades: Enabled (Debian security only)"
+    if [ "$UU_REBOOT" = true ]; then
+        echo "  Auto-reboot:      Yes (at $UU_REBOOT_TIME)"
+    else
+        echo "  Auto-reboot:      No"
+    fi
+    echo "  Auto-remove deps: $([ "$UU_AUTOREMOVE" = true ] && echo Yes || echo No)"
+    [[ -n "$UU_MAIL" ]] && echo "  Mail reports to:  $UU_MAIL"
+else
+    echo "Unattended-Upgrades: Disabled"
+fi
 if [ "$CONFIGURE_GPU" = true ]; then
     echo "iGPU Passthrough:    Enabled (host-level wiring)"
     echo "  Render node: $INTEL_RENDER"
     [[ -n "$INTEL_CARD" ]] && echo "  Card node:   $INTEL_CARD"
-    if [ "$INSTALL_GPU_DRIVERS" = true ]; then
-        echo "  VA-API drivers: Installed"
-    else
-        echo "  VA-API drivers: Not installed"
-    fi
+    echo "  VA-API drivers: $([ "$INSTALL_GPU_DRIVERS" = true ] && echo Installed || echo "Not installed")"
 fi
 if [ ${#SELECTED_MOUNTS[@]} -gt 0 ]; then
     echo ""; echo "Mount Points:"
