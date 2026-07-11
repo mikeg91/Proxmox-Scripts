@@ -47,10 +47,12 @@ echo
 echo -e "${GREEN}Logs:${NC}"
 echo "  /var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Logs/"
 
+IP=$(ip -4 addr show scope global | awk '/inet/ {print $2}' | cut -d/ -f1 | head -n1)
+
 echo
 echo -e "${GREEN}=== Installation Complete ===${NC}"
 echo "• Plex repository added and trusted"
 echo "• Plex Media Server installed"
 echo
 echo -e "${GREEN}Access Plex at:${NC}"
-echo "  http://<container-ip>:32400/web"
+echo "  http://$IP:32400/web"
