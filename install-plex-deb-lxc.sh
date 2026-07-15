@@ -1,6 +1,23 @@
-#!/usr/bin/env bash
-
+#!/bin/bash
 set -euo pipefail
+IFS=$'\n\t'
+#
+################################################################
+# Script:       install-plex-deb-lxc.sh
+# Purpose:      Installs Plex Media Server in a Debian 12 LXC container
+# Functions:
+# - Installs prerequisites (curl, gnupg2, ca-certificates)
+# - Adds the official Plex repository and GPG key
+# - Installs Plex Media Server from the official Plex repository 
+#
+################################################################
+#
+# History 
+#
+# v1.0 JUL 10 2026 mikeg91 - Initial version
+#
+################################################################
+#
 
 GREEN='\033[0;32m'
 NC='\033[0m'
