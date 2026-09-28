@@ -7,8 +7,10 @@
 # support for QSV/VAAPI encoding and OpenCL (HDR tone mapping).
 #
 # Run INSIDE the container as root:
-#     bash fileflows-manage.sh install      # first install; copies itself to
-#                                           # /usr/local/sbin/fileflows-manage
+#     bash -c "$(curl -fsSL <raw-url>)"     # first install (no argument needed)
+#     bash -c "$(curl -fsSL <raw-url>)" _ install   # same, explicit command
+#     bash fileflows-manage.sh install      # or from a downloaded copy
+#   The install copies the script to /usr/local/sbin/fileflows-manage.
 #     fileflows-manage update               # show versions, confirm, update
 #     fileflows-manage rollback             # restore the newest backup
 #     fileflows-manage status               # versions, service, GPU, backups
@@ -87,6 +89,9 @@ INSTALL_SYSTEM_VAAPI="${INSTALL_SYSTEM_VAAPI:-ask}"
 
 FFMPEG_DIR=/usr/lib/jellyfin-ffmpeg
 SELF_PATH=/usr/local/sbin/fileflows-manage
+# Where to fetch this script from when it was run via curl (no file on disk),
+# so it can still install itself to SELF_PATH. Change if you move/rename it.
+SELF_URL="${SELF_URL:-https://raw.githubusercontent.com/mikeg91/Proxmox-Scripts/refs/heads/main/FileFlow-Install-LXC.sh}"
 SERVER_DLL="${INSTALL_DIR}/Server/FileFlows.Server.dll"
 VERSION_FILE="${INSTALL_DIR}/.installed-version"
 RELEASE_NOTES="https://fileflows.com/docs/versions"
@@ -411,15 +416,30 @@ wait_for_web() {
 }
 
 # Copy this script to /usr/local/sbin so updates run the same reviewed code.
+# Works both when run from a file and when run via bash -c "$(curl ...)".
 install_self() {
-  local src
-  src="$(readlink -f "$0" 2>/dev/null || true)"
-  if [[ -f "$src" && "$src" != "$SELF_PATH" ]]; then
-    install -m 0755 "$src" "$SELF_PATH"
-    msg "Installed ${SELF_PATH}"
-  elif [[ ! -f "$src" ]]; then
-    warn "Could not locate this script on disk; copy it to ${SELF_PATH} manually."
+  local src="" tmp
+  if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    src="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
   fi
+
+  if [[ -f "$src" ]]; then
+    if [[ "$src" != "$SELF_PATH" ]]; then install -m 0755 "$src" "$SELF_PATH"; fi
+    msg "Management script: ${SELF_PATH}"
+    return 0
+  fi
+
+  # No file on disk (piped/curl run): download a copy and sanity-check it.
+  tmp="$(mktemp)"
+  if curl -fsSL -o "$tmp" "$SELF_URL" && bash -n "$tmp" \
+     && grep -q 'fileflows-manage' "$tmp"; then
+    install -m 0755 "$tmp" "$SELF_PATH"
+    msg "Management script: ${SELF_PATH} (downloaded from ${SELF_URL})"
+  else
+    warn "Could not install ${SELF_PATH} from ${SELF_URL}."
+    warn "Copy the script there manually to use 'fileflows-manage update' later."
+  fi
+  rm -f "$tmp"
 }
 
 # Container's first global IPv4 address (same approach as your other scripts),
@@ -638,8 +658,18 @@ cmd_gputest() {
 }
 
 usage() {
-  sed -n '2,16p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
-  exit 1
+  cat <<'EOF'
+Usage: fileflows-manage <command>
+
+  install     Install FileFlows (default when run with no command and
+              FileFlows isn't installed yet)
+  update      Show installed vs available version, confirm, then update
+  rollback    Restore the newest pre-update backup (or: rollback <file>)
+  status      Versions, service state, web address, GPU, backups
+  gputest     QSV / VAAPI / OpenCL hardware checks
+
+Run via curl with a command:  bash -c "$(curl -fsSL <url>)" _ update
+EOF
 }
 
 case "${1:-}" in
@@ -648,5 +678,15 @@ case "${1:-}" in
   rollback) shift; cmd_rollback "${1:-}" ;;
   status)   cmd_status ;;
   gputest)  cmd_gputest ;;
-  *)        usage ;;
+  help|-h|--help) usage ;;
+  "")
+    # No command: fresh container -> install. Already installed -> help.
+    if [[ -f "$SERVER_DLL" ]]; then
+      msg "FileFlows is already installed ($(installed_version || true))."
+      usage
+    else
+      cmd_install
+    fi
+    ;;
+  *) usage; exit 1 ;;
 esac
