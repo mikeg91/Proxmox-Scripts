@@ -239,7 +239,7 @@ MOUNT_POINTS=()
 while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     [[ -z "${line// }" ]] && continue
-    read -r device mountpoint fstype rest <<< "$line"
+    IFS=$' \t' read -r device mountpoint fstype rest <<< "$line"
     [[ -z "$mountpoint" ]] && continue
     [[ "$fstype" =~ ^(swap|proc|tmpfs|devpts|sysfs|devtmpfs|cgroup.*|securityfs|debugfs|configfs|fusectl|pstore|bpf|tracefs|hugetlbfs|mqueue|autofs)$ ]] && continue
     [[ "$mountpoint" =~ ^(/|/boot.*)$ ]] && continue
