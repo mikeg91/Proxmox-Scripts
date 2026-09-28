@@ -15,6 +15,7 @@
 #     fileflows-manage rollback             # restore the newest backup
 #     fileflows-manage status               # versions, service, GPU, backups
 #     fileflows-manage gputest              # QSV / VAAPI / OpenCL checks
+#     fileflows-manage self-update          # refresh this script from GitHub
 #
 # -----------------------------------------------------------------------------
 # Recommended container (create it however you normally do)
@@ -77,6 +78,10 @@
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# Version of THIS script (not FileFlows). Bump when you change the script so
+# you can tell which copy GitHub is serving and which is installed.
+SCRIPT_VERSION="2026.09.28-1"
+
 INSTALL_DIR="${INSTALL_DIR:-/opt/fileflows}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/fileflows-backups}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-3}"
@@ -88,7 +93,7 @@ FORCE="${FORCE:-0}"
 INSTALL_SYSTEM_VAAPI="${INSTALL_SYSTEM_VAAPI:-ask}"
 
 FFMPEG_DIR=/usr/lib/jellyfin-ffmpeg
-SELF_PATH=/usr/local/sbin/fileflows-manage
+SELF_PATH="${SELF_PATH:-/usr/local/sbin/fileflows-manage}"
 # Where to fetch this script from when it was run via curl (no file on disk),
 # so it can still install itself to SELF_PATH. Change if you move/rename it.
 SELF_URL="${SELF_URL:-https://raw.githubusercontent.com/mikeg91/Proxmox-Scripts/refs/heads/main/FileFlow-Install-LXC.sh}"
@@ -128,9 +133,11 @@ trap 'die "Failed at line ${LINENO}: ${BASH_COMMAND}"' ERR
 confirm() {
   if [[ "$ASSUME_YES" == "1" ]]; then return 0; fi
   local reply=""
-  if ! { read -r -p "$1 [y/N]: " reply </dev/tty; } 2>/dev/null; then
-    return 1
-  fi
+  # No usable terminal (cron, piped with no tty): treat as No, quietly.
+  if ! (exec </dev/tty) 2>/dev/null; then return 1; fi
+  # Print the question to the terminal itself so it's always visible.
+  printf '%s [y/N]: ' "$1" >/dev/tty
+  read -r reply </dev/tty || return 1
   [[ "$reply" =~ ^([yY]|[yY][eE][sS])$ ]]
 }
 
@@ -255,7 +262,14 @@ install_opencl() {
 # Optional: Debian's own iHD VAAPI driver + vainfo (non-free component).
 # Not used by jellyfin-ffmpeg; useful only if other tools in this CT need it.
 maybe_install_system_vaapi() {
-  local choice="$INSTALL_SYSTEM_VAAPI"
+  local choice="$INSTALL_SYSTEM_VAAPI" ver
+  # Already there (e.g. installed by your usual container setup): no question.
+  ver="$(dpkg-query -W -f='${Status} ${Version}' intel-media-va-driver-non-free 2>/dev/null || true)"
+  if [[ "$ver" == "install ok installed "* ]]; then
+    VAAPI_STATUS="intel-media-va-driver-non-free ${ver##* } (already installed)"
+    msg "System Intel VAAPI driver already installed (${ver##* }); skipping."
+    return 0
+  fi
   if [[ "$choice" == "ask" ]]; then
     if [[ "$ASSUME_YES" == "1" ]]; then
       choice="no"
@@ -285,7 +299,7 @@ EOF
     apt-get update
   fi
   apt-get install -y intel-media-va-driver-non-free vainfo
-  VAAPI_STATUS="intel-media-va-driver-non-free + vainfo installed"
+  VAAPI_STATUS="intel-media-va-driver-non-free $(dpkg-query -W -f='${Version}' intel-media-va-driver-non-free 2>/dev/null || true) + vainfo installed"
 }
 
 # Install the ASP.NET Core runtime major version a FileFlows build needs.
@@ -296,7 +310,10 @@ ensure_dotnet() {
     return 0
   fi
   add_microsoft_repo
-  apt-get update
+  # Only refresh package lists if apt doesn't know the package yet.
+  if ! apt-cache show "aspnetcore-runtime-${major}.0" >/dev/null 2>&1; then
+    apt-get update
+  fi
   msg "Installing aspnetcore-runtime-${major}.0"
   apt-get install -y "aspnetcore-runtime-${major}.0"
 }
@@ -465,6 +482,7 @@ print_access() {
 # -----------------------------------------------------------------------------
 cmd_install() {
   need_root
+  msg "fileflows-manage script version ${SCRIPT_VERSION}"
   check_os
   if [[ -f "$SERVER_DLL" ]]; then
     die "FileFlows is already installed in ${INSTALL_DIR}. Use: fileflows-manage update"
@@ -607,6 +625,7 @@ cmd_rollback() {
 
 cmd_status() {
   local node
+  echo "Script version    : ${SCRIPT_VERSION}"
   echo "FileFlows version : $(installed_version || true)"
   echo "Service           : $(systemctl is-active fileflows 2>/dev/null || true)"
   echo "Web console       : http://$(container_ip):${PORT}/"
@@ -631,8 +650,13 @@ cmd_gputest() {
   [[ -n "$node" ]] || { warn "No render node in this container; skipping GPU tests."; return 0; }
   msg "Render node: ${node}"
 
+  msg "Driver used by FileFlows (bundled with jellyfin-ffmpeg):"
   "${FFMPEG_DIR}/vainfo" --display drm --device "$node" 2>/dev/null \
     | grep -E 'Driver version|VAProfileHEVCMain' || warn "vainfo returned nothing useful"
+  if command -v vainfo >/dev/null; then
+    msg "System driver (Debian package, not used by FileFlows):"
+    vainfo --display drm --device "$node" 2>/dev/null | grep 'Driver version' || true
+  fi
 
   run_test() { # $1 label, rest = ffmpeg args
     local label="$1"; shift
@@ -657,6 +681,42 @@ cmd_gputest() {
     -f lavfi -i testsrc2=size=320x240 -frames:v 1
 }
 
+# Refresh the installed copy of this script from SELF_URL, showing the old and
+# new script versions first. Refuses files that don't parse or don't look
+# like this script (e.g. an HTML error page).
+cmd_self_update() {
+  need_root
+  local tmp new_ver cur_ver="unknown"
+  tmp="$(mktemp)"
+  msg "Downloading ${SELF_URL}"
+  curl -fsSL -H 'Cache-Control: no-cache' -o "$tmp" "$SELF_URL" || { rm -f "$tmp"; die "Download failed."; }
+  if ! bash -n "$tmp" || ! grep -q '^SCRIPT_VERSION=' "$tmp"; then
+    rm -f "$tmp"; die "Downloaded file isn't a valid copy of this script."
+  fi
+  new_ver="$(sed -n 's/^SCRIPT_VERSION="\(.*\)"$/\1/p' "$tmp" | head -n1)"
+  if [[ -f "$SELF_PATH" ]]; then
+    cur_ver="$(sed -n 's/^SCRIPT_VERSION="\(.*\)"$/\1/p' "$SELF_PATH" | head -n1)"
+    cur_ver="${cur_ver:-older than 2026.09.28 (no version marker)}"
+  fi
+  echo
+  echo "  Installed script : ${cur_ver}"
+  echo "  GitHub copy      : ${new_ver}"
+  echo "  SHA-256          : $(sha256sum "$tmp" | cut -d' ' -f1)"
+  echo
+  if [[ "$cur_ver" == "$new_ver" && "$FORCE" != "1" ]]; then
+    rm -f "$tmp"
+    msg "Already current. If you just pushed a change, GitHub's cache can lag a few minutes."
+    return 0
+  fi
+  if confirm "Replace ${SELF_PATH}?"; then
+    install -m 0755 "$tmp" "$SELF_PATH"
+    msg "Updated ${SELF_PATH} to ${new_ver}"
+  else
+    msg "Aborted. Nothing was changed."
+  fi
+  rm -f "$tmp"
+}
+
 usage() {
   cat <<'EOF'
 Usage: fileflows-manage <command>
@@ -667,6 +727,8 @@ Usage: fileflows-manage <command>
   rollback    Restore the newest pre-update backup (or: rollback <file>)
   status      Versions, service state, web address, GPU, backups
   gputest     QSV / VAAPI / OpenCL hardware checks
+  self-update Refresh this script from GitHub (shows versions first)
+  version     Print this script's version
 
 Run via curl with a command:  bash -c "$(curl -fsSL <url>)" _ update
 EOF
@@ -678,6 +740,8 @@ case "${1:-}" in
   rollback) shift; cmd_rollback "${1:-}" ;;
   status)   cmd_status ;;
   gputest)  cmd_gputest ;;
+  self-update) cmd_self_update ;;
+  version|--version) echo "fileflows-manage ${SCRIPT_VERSION}" ;;
   help|-h|--help) usage ;;
   "")
     # No command: fresh container -> install. Already installed -> help.
