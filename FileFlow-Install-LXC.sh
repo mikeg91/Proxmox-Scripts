@@ -80,7 +80,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 # Version of THIS script (not FileFlows). Bump when you change the script so
 # you can tell which copy GitHub is serving and which is installed.
-SCRIPT_VERSION="2026.09.28-1"
+SCRIPT_VERSION="2026.09.28-3"
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/fileflows}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/fileflows-backups}"
@@ -108,6 +108,7 @@ NC='\e[0m'
 
 # Filled in during install so the summary reports what actually happened
 OPENCL_STATUS="not installed"
+PATH_NOTE=""
 VAAPI_STATUS="not installed (jellyfin-ffmpeg uses its own bundled copy)"
 
 STAGE_ROOT=""
@@ -142,6 +143,19 @@ confirm() {
 }
 
 need_root() { [[ $EUID -eq 0 ]] || die "Run as root."; }
+
+# Safety: this must only ever run INSIDE a container. The Proxmox host is
+# also Debian, so the OS check alone would not stop a run on the host.
+require_container() {
+  if [[ -d /etc/pve ]] || command -v pveversion >/dev/null 2>&1; then
+    die "This looks like the Proxmox host. Run it inside the container (pct enter <CTID>)."
+  fi
+  local virt=""
+  virt="$(systemd-detect-virt --container 2>/dev/null || true)"
+  if [[ -z "$virt" || "$virt" == "none" ]]; then
+    die "Not running inside a container (systemd-detect-virt reports '${virt:-none}'). Refusing to continue."
+  fi
+}
 
 # Supported: Debian 12 and 13. Sets OS_VERSION_ID and OS_CODENAME.
 check_os() {
@@ -433,6 +447,20 @@ wait_for_web() {
 }
 
 # Copy this script to /usr/local/sbin so updates run the same reviewed code.
+# Shells opened with "pct enter" may not have /usr/local/sbin in PATH, so
+# "fileflows-manage" wouldn't be found by name. If the shell that ran this
+# script lacks it, add it to root's .bashrc once (marked, so never duplicated).
+ensure_path() {
+  local dir; dir="$(dirname "$SELF_PATH")"
+  case ":${PATH}:" in *":${dir}:"*) return 0 ;; esac
+  if ! grep -q 'fileflows-manage PATH' /root/.bashrc 2>/dev/null; then
+    # shellcheck disable=SC2016  # $PATH must be written literally, expanded at login
+    printf '\n# fileflows-manage PATH\nexport PATH="/usr/local/sbin:/usr/local/bin:$PATH"\n' >> /root/.bashrc
+    msg "Added /usr/local/sbin to PATH in /root/.bashrc (it was missing in this shell)."
+  fi
+  PATH_NOTE="Run 'source /root/.bashrc' (or reconnect) before using fileflows-manage by name."
+}
+
 # Works both when run from a file and when run via bash -c "$(curl ...)".
 install_self() {
   local src="" tmp
@@ -482,6 +510,7 @@ print_access() {
 # -----------------------------------------------------------------------------
 cmd_install() {
   need_root
+  require_container
   msg "fileflows-manage script version ${SCRIPT_VERSION}"
   check_os
   if [[ -f "$SERVER_DLL" ]]; then
@@ -510,6 +539,7 @@ cmd_install() {
   install_service
   wait_for_web
   install_self
+  ensure_path
   cmd_gputest
 
   local svc
@@ -533,10 +563,15 @@ cmd_install() {
   echo
   echo "Later: 'apt update && apt upgrade' for system packages,"
   echo "       'fileflows-manage update' for FileFlows itself."
+  if [[ -n "$PATH_NOTE" ]]; then
+    echo
+    echo -e "${YELLOW}Note:${NC} ${PATH_NOTE}"
+  fi
 }
 
 cmd_update() {
   need_root
+  require_container
   check_os
   [[ -f "$SERVER_DLL" ]] || die "FileFlows is not installed. Use: fileflows-manage install"
   local tool
@@ -592,6 +627,7 @@ cmd_update() {
 # Restore the newest backup (or the file given as $1): app files and Data.
 cmd_rollback() {
   need_root
+  require_container
   local backup="${1:-}" cur bver ts
   if [[ -z "$backup" ]]; then
     backup="$(find "$BACKUP_DIR" -maxdepth 1 -name 'fileflows_*.tar.gz' -printf '%T@ %p\n' 2>/dev/null \
@@ -686,6 +722,7 @@ cmd_gputest() {
 # like this script (e.g. an HTML error page).
 cmd_self_update() {
   need_root
+  require_container
   local tmp new_ver cur_ver="unknown"
   tmp="$(mktemp)"
   msg "Downloading ${SELF_URL}"
@@ -711,6 +748,8 @@ cmd_self_update() {
   if confirm "Replace ${SELF_PATH}?"; then
     install -m 0755 "$tmp" "$SELF_PATH"
     msg "Updated ${SELF_PATH} to ${new_ver}"
+    ensure_path
+    if [[ -n "$PATH_NOTE" ]]; then msg "$PATH_NOTE"; fi
   else
     msg "Aborted. Nothing was changed."
   fi
