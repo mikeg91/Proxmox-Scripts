@@ -29,11 +29,13 @@ ps -u plex -o pid,ppid,etime,%cpu,args --sort=-%cpu | head -n 15
 hdr "Payload files"
 find / /dev/shm -xdev -type f \( -name myawesomeproxy -o -name mylovelyminer -o -name x12345 -o -name xmrig \) 2>/dev/null \
   | grep . && bad "Known payload filename on disk"
-# Plex-owned files outside its data dir + all codec .so files, hashed against known samples
+# Plex-owned files outside its data dir (skipping image/metadata stores) + all codec .so files,
+# hashed against known samples
 while IFS= read -r -d '' f; do
   grep -qx "$(sha256sum "$f" | cut -d' ' -f1)" <<<"$HASHES" && bad "Known malware hash: $f"
   [[ $f != "$PMS"/* ]] && echo "  plex-owned file outside data dir: $f"
-done < <(find / /dev/shm -xdev -type f -user plex ! -path "$PMS/*" -print0 2>/dev/null
+done < <(find / /dev/shm -xdev \( -path "$PMS" -o -name Cache -o -name Metadata -o -name Media \) -prune \
+              -o -type f -user plex -print0 2>/dev/null
          find "$PMS/Codecs" -type f -name '*.so' -print0 2>/dev/null)
 
 hdr "Codecs .so, newest first (each should line up with a Plex update)"
